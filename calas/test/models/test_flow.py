@@ -38,7 +38,7 @@ class AE_UNet_Repr(RepresentationWithReconstruct):
 
             self.hidden_modules.append(nn.Sequential(*mods))
 
-        self._decoder = nn.Linear(in_features=self.embed_dim, out_features=self.input_dim, bias=True)
+        self._decoder = nn.Linear(in_features=self.hidden_sizes[-1], out_features=self.input_dim, bias=True)
     
 
     @property
@@ -60,6 +60,11 @@ class AE_UNet_Repr(RepresentationWithReconstruct):
             prev = reprs[-1]
         
         return torch.hstack(reprs)
+    
+    @override
+    def reconstruct(self, embeddings: Tensor) -> Tensor:
+        embeddings = embeddings[:, -self.hidden_sizes[-1]:] # take the last n features.
+        return super().reconstruct(embeddings)
     
 
 
