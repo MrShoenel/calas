@@ -38,7 +38,7 @@ class AE_UNet_Repr(RepresentationWithReconstruct):
 
             self.hidden_modules.append(nn.Sequential(*mods))
 
-        self._decoder = nn.Linear(in_features=self.hidden_sizes[-1], out_features=self.input_dim, bias=True)
+        self._decoder = nn.Linear(in_features=sum(self.hidden_sizes), out_features=self.input_dim, bias=True)
     
 
     @property
@@ -61,10 +61,10 @@ class AE_UNet_Repr(RepresentationWithReconstruct):
         
         return torch.hstack(reprs)
     
-    @override
-    def reconstruct(self, embeddings: Tensor) -> Tensor:
-        embeddings = embeddings[:, -self.hidden_sizes[-1]:] # take the last n features.
-        return super().reconstruct(embeddings)
+    # @override
+    # def reconstruct(self, embeddings: Tensor) -> Tensor:
+    #     embeddings = embeddings[:, -self.hidden_sizes[-1]:] # take the last n features.
+    #     return super().reconstruct(embeddings)
     
 
 
@@ -93,8 +93,9 @@ def test_calas():
 
 
 def test_calas_repr():
-    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(56,16,56))
-    assert repr.embed_dim == 128
+    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(32,16,32))
+    assert repr.embed_dim == 80
+    assert repr._decoder.in_features == sum((32,16,32)) and repr._decoder.out_features == 2
 
     flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr)
     
