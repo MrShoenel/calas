@@ -73,4 +73,4 @@ def two_moons_rejection_sampling(nsamples: int, seed: int=0, complementary: bool
             samples.append(accept)
             ndone += accept.shape[0]
     
-    return torch.cat(samples)
+    return torch.cat(samples)[0:nsamples]
