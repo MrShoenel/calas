@@ -51,11 +51,13 @@ class RepresentationWithReconstruct(Representation):
 
 
     def loss(self, x: Tensor) -> Tensor:
-        i = nn.functional.softmax(5*nn.functional.tanh(.2*x))
+        prepare = lambda t: nn.functional.softmax(5*nn.functional.tanh(.2*t))
+
+        i = prepare(x)
 
         i_prime = self.forward(x=x)
         i_prime = self.decoder(i_prime)
-        i_prime = nn.functional.softmax(5*nn.functional.tanh(i_prime))
+        i_prime = prepare(i_prime)
 
         return nn.functional.kl_div(
             input=torch.log(i), target=i_prime, log_target=False)
