@@ -25,6 +25,14 @@ class CalasFlow(nn.Module):
 
         self._cond_means = torch.tensor(list(self.mean_for_class(clazz=i) for i in range(self.num_classes)), device=self.dev)
         self._cond_log_scales = torch.log(torch.tensor(list(self.scale_for_class(clazz=i) for i in range(self.num_classes)), device=self.dev))
+
+        self._loss_grad_wrt_inputs = jacrev(func=self.loss)
+        self._loss_emb_grad_wrt_inputs = jacrev(func=self.loss_emb)
+    
+
+    @property
+    def can_reconstruct(self) -> bool:
+        return False
     
 
     def mean_for_class(self, clazz: int) -> float:
@@ -145,6 +153,24 @@ class CalasFlow(nn.Module):
         raise Exception('Intent not clear, call, e.g., x_to_b, b_to_x, log_prob, or loss, etc.')
     
 
+    def loss_grad_wrt_input(self, embedded: Tensor, classes: Tensor) -> Tensor:
+        """
+        The derivative of this flow's loss with regard to the inputs (here: the embeddings).
+        This function tells us how the inputs (*not* the flow's parameters) in the embedding
+        space need to be changed in order to increase/decrease the resulting loss.
+        """
+        return self._loss_grad_wrt_inputs(embedded, classes)
+    
+
+    def loss_emb_grad_wrt_input(self, embedded: Tensor, classes: Tensor) -> Tensor:
+        """
+        The derivative of this flow's loss with regard to the inputs (here: the embeddings).
+        This function tells us how the inputs (*not* the flow's parameters) in the embedding
+        space need to be changed in order to increase/decrease the resulting loss.
+        """
+        return self._loss_emb_grad_wrt_inputs(embedded, classes)
+    
+
     def make_linear_global_anomaly(self, input: Tensor, classes: Tensor, likelihood: Literal['increase', 'decrease']) -> Tensor:
         """
         Change the likelihood of each sample in data under the current model.
@@ -218,17 +244,16 @@ class CalasFlowWithRepr(CalasFlow):
         super().__init__(num_dims=repr.embed_dim, num_classes=num_classes, flows=flows, dev=dev, *args, **kwargs)
 
         self.repr = repr
-        self._loss_grad_wrt_inputs = jacrev(func=self.loss)
-        self._loss_emb_grad_wrt_inputs = jacrev(func=self.loss_emb)
     
 
     @property
+    @override
     def can_reconstruct(self) -> bool:
         return isinstance(self.repr, RepresentationWithReconstruct)
 
     @override
-    def log_rel_lik(self, x: Tensor, classes: Tensor) -> Tensor:
-        embedded = self.repr.forward(x=x)
+    def log_rel_lik(self, input: Tensor, classes: Tensor) -> Tensor:
+        embedded = self.repr.embed(x=input)
         return self.log_rel_lik_emb(embeddings=embedded, classes=classes)
     
     @override
@@ -239,24 +264,6 @@ class CalasFlowWithRepr(CalasFlow):
     def x_from_e(self, embeddings: Tensor) -> Tensor:
         assert self.can_reconstruct, 'Can only sample if the representation supports reconstruction.'
         return self.repr.reconstruct(embeddings=embeddings)
-    
-
-    def loss_grad_wrt_input(self, embedded: Tensor, classes: Tensor) -> Tensor:
-        """
-        The derivative of this flow's loss with regard to the inputs (here: the embeddings).
-        This function tells us how the inputs (*not* the flow's parameters) in the embedding
-        space need to be changed in order to increase/decrease the resulting loss.
-        """
-        return self._loss_grad_wrt_inputs(embedded, classes)
-    
-
-    def loss_emb_grad_wrt_input(self, embedded: Tensor, classes: Tensor) -> Tensor:
-        """
-        The derivative of this flow's loss with regard to the inputs (here: the embeddings).
-        This function tells us how the inputs (*not* the flow's parameters) in the embedding
-        space need to be changed in order to increase/decrease the resulting loss.
-        """
-        return self._loss_emb_grad_wrt_inputs(embedded, classes)
 
 
     def make_random_cod_anomaly(self) -> Tensor:
