@@ -35,7 +35,6 @@ class AE_UNet_Repr(RepresentationWithReconstruct):
                 mods.append(nn.Dropout1d(p=0.2))
             mods.append(nn.Linear(in_features=num_in, out_features=num_out, bias=True))
             mods.append(nn.SiLU())
-
             self.hidden_modules.append(nn.Sequential(*mods))
 
         self._decoder = nn.Linear(in_features=sum(self.hidden_sizes), out_features=self.input_dim, bias=True)
@@ -58,13 +57,7 @@ class AE_UNet_Repr(RepresentationWithReconstruct):
         for seq in self.hidden_modules:
             reprs.append(seq(prev))
             prev = reprs[-1]
-        
         return torch.hstack(reprs)
-    
-    # @override
-    # def reconstruct(self, embeddings: Tensor) -> Tensor:
-    #     embeddings = embeddings[:, -self.hidden_sizes[-1]:] # take the last n features.
-    #     return super().reconstruct(embeddings)
     
 
 
@@ -180,5 +173,5 @@ def test_spaces_and_calas():
 
     # However, that here should work!
     higher_lik = flow.make_linear_global_anomaly(input=samp, classes=samp_class, likelihood='increase')
-    samp_lik = flow.log_rel_lik(x=samp, classes=samp_class)
-    assert torch.all(samp_lik < flow.log_rel_lik(x=higher_lik, classes=samp_class))
+    samp_lik = flow.log_rel_lik(input=samp, classes=samp_class)
+    assert torch.all(samp_lik < flow.log_rel_lik(input=higher_lik, classes=samp_class))
