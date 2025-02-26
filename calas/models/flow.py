@@ -142,7 +142,7 @@ class CalasFlow(nn.Module):
 
     @final
     def forward(self, *args, **kwargs) -> None:
-        raise Exception('Intent not clear, call, e.g., x_to_b, b_to_x, log_prob, or loss, etc.')
+        raise Exception('Intent not clear, call, e.g., x_to_e, log_prob, loss, ..., etc.')
     
 
     def make_linear_global_anomaly(self, input: Tensor, classes: Tensor, likelihood: Literal['increase', 'decrease']) -> Tensor:
