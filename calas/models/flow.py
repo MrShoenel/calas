@@ -6,7 +6,7 @@ from torch.distributions.uniform import Uniform
 from normflows import ConditionalNormalizingFlow
 from normflows.distributions.base import ConditionalDiagGaussian
 from normflows.flows import Flow
-from typing import Optional, Union, override, Literal, final
+from typing import Optional, Union, override, Literal, final, Iterator
 from .repr import Representation, ReconstructableRepresentation
 
 
@@ -35,6 +35,17 @@ class CalasFlow(nn.Module):
         self._loss_emb_grad_wrt_inputs = jacrev(func=self.loss_emb)
     
 
+    @override
+    def parameters(self, recurse: bool=True) -> Iterator[nn.Parameter]:
+        assert recurse, "`recurse` must be set to true in order to get all of the underlying flow's parameters."
+        """
+        Overridden to always return the parameters of the underlying flow and
+        its base distribution. Recurse must be True
+        """
+        for param in self.flow.parameters(recurse=recurse):
+            yield param
+    
+
     @property
     def dev(self) -> device:
         return self._dev_tracker.device
@@ -61,7 +72,7 @@ class CalasFlow(nn.Module):
     
 
     def ctx_endoder(self, classes: Tensor) -> Tensor:
-        clz_int = classes.squeeze().to(torch.int64)
+        clz_int = torch.atleast_1d(classes.squeeze().to(torch.int64))
         if not torch._C._functorch.is_functorch_wrapped_tensor(clz_int):
             assert clz_int.dim() == 1
             assert all(c >= 0 and c < self.num_classes for c in clz_int.detach().cpu().tolist())
@@ -87,6 +98,16 @@ class CalasFlow(nn.Module):
         return input
     
 
+    def x_to_b(self, input: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Convenience method that performs a full pass from data/input space (X) to base
+        space (B), by also passing the X through the representation/embedding space (E)
+        first.
+        """
+        emb = self.x_to_e(input=input)
+        return self.e_to_b(embeddings=emb, classes=classes)
+    
+
     def x_from_e(self, embeddings: Tensor) -> Tensor:
         """
         Inverse pass, from representation/embedding space (E) to data/input space (X).
@@ -109,6 +130,16 @@ class CalasFlow(nn.Module):
         Returns the result in the representation/embedding space and the log-determinant.
         """
         return self.flow.forward_and_log_det(z=base, context=self.ctx_endoder(classes=classes))
+    
+
+    def x_from_b(self, base: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Convenience method that performs a full pass from base space (B) all the way back
+        to the input/data space (X), by also passing X through the representation/embedding
+        space (E) first.
+        """
+        emb, log_det = self.e_from_b(base=base, classes=classes)
+        return self.x_from_e(embeddings=emb), log_det
     
 
     def log_rel_lik(self, input: Tensor, classes: Tensor) -> Tensor:
@@ -191,8 +222,22 @@ class CalasFlow(nn.Module):
 class CalasFlowWithRepr(CalasFlow):
     def __init__(self, num_classes: int, flows: list[Flow], repr: Union[Representation, ReconstructableRepresentation], *args, **kwargs):
         super().__init__(num_dims=repr.embed_dim, num_classes=num_classes, flows=flows, *args, **kwargs)
-
         self.repr = repr
+    
+
+    @override
+    def parameters(self, recurse = True) -> Iterator[nn.Parameter]:
+        """
+        Always returns the parameters of the underlying flow and its base distribution.
+        If `recurse = True`, also yields the parameters of own modules, such as those
+        of the representation.
+        """
+        for param in super().parameters(recurse=True):
+            yield param
+        
+        if recurse:
+            for param in self.repr.parameters(recurse=recurse):
+                yield param
     
 
     @property

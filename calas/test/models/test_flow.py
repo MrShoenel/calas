@@ -20,8 +20,11 @@ def make_flows(K: int=4, dim: int=2, units: int=128, layers: int=2) -> list[Flow
 
 
 class AE_UNet_Repr(ReconstructableRepresentation):
-    def __init__(self, input_dim, hidden_sizes: Sequence[int], *args, **kwargs):
+    def __init__(self, input_dim, hidden_sizes: int|Sequence[int], *args, **kwargs):
         super().__init__(input_dim, *args, **kwargs)
+
+        if isinstance(hidden_sizes, int):
+            hidden_sizes = (hidden_sizes,)
 
         self.hidden_sizes = hidden_sizes
 

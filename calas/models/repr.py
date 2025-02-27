@@ -59,16 +59,19 @@ class ReconstructableRepresentation(Representation):
 
 
     def loss(self, x: Tensor) -> Tensor:
+        """
+        This is the loss of the reconstruction.
+        """
         prepare = lambda t: nn.functional.softmax(5*nn.functional.tanh(.2*t))
 
-        i = prepare(x)
+        i_target = prepare(x)
 
-        i_prime = self.embed(x=x)
-        i_prime = self.decoder(i_prime)
-        i_prime = prepare(i_prime)
+        i_reconst = self.embed(x=x)
+        i_reconst = self.decoder(i_reconst)
+        i_reconst = prepare(i_reconst)
 
         return nn.functional.kl_div(
-            input=torch.log(i), target=i_prime, log_target=False)
+            input=torch.log(i_reconst), target=i_target, log_target=False)
 
 
 
