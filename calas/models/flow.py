@@ -1,33 +1,48 @@
 import torch
-from torch import nn, Tensor, device
-from torch.func import vmap, jacrev
+from torch import nn, Tensor, device, dtype
+from torch.func import jacrev
 from torch.distributions.normal import Normal
 from torch.distributions.uniform import Uniform
 from normflows import ConditionalNormalizingFlow
 from normflows.distributions.base import ConditionalDiagGaussian
 from normflows.flows import Flow
 from typing import Optional, Union, override, Literal, final
-from .repr import Representation, RepresentationWithReconstruct
+from .repr import Representation, ReconstructableRepresentation
 
 
 
 
 
 class CalasFlow(nn.Module):
-    def __init__(self, num_dims: int, num_classes: int, flows: list[Flow], dev: device=device('cpu'), *args, **kwargs):
+    def __init__(self, num_dims: int, num_classes: int, flows: list[Flow], *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.dev = dev
         self.num_classes = num_classes
         self.num_dims = num_dims
         self.base_dist = ConditionalDiagGaussian(shape=num_dims, context_encoder=lambda c: c)
         self.flow = ConditionalNormalizingFlow(q0=self.base_dist, flows=flows)
 
-        self._cond_means = torch.tensor(list(self.mean_for_class(clazz=i) for i in range(self.num_classes)), device=self.dev)
-        self._cond_log_scales = torch.log(torch.tensor(list(self.scale_for_class(clazz=i) for i in range(self.num_classes)), device=self.dev))
+        # We keep around this empty buffer because it will be affected when someone
+        # calls model.to(..device..). Then, whenever we need to access the device
+        # the model is currently on, we can check the device of this buffer.
+        self.register_buffer(name='_dev_tracker', tensor=torch.empty(0))
+
+        extent = self.num_classes * 6. # We'll space normal distributions apart by 6 with an sd of 0.5
+        self.register_buffer(name='cond_means', tensor=torch.tensor(list(-1/2*extent + i*6. + 3. for i in range(self.num_classes))))
+        self.register_buffer(name='cond_log_scales', tensor=torch.log(torch.tensor([0.5]*self.num_classes)))
 
         self._loss_grad_wrt_inputs = jacrev(func=self.loss)
         self._loss_emb_grad_wrt_inputs = jacrev(func=self.loss_emb)
+    
+
+    @property
+    def dev(self) -> device:
+        return self._dev_tracker.device
+    
+
+    @property
+    def dtype(self) -> dtype:
+        return self._dev_tracker.dtype
     
 
     @property
@@ -35,14 +50,14 @@ class CalasFlow(nn.Module):
         return False
     
 
-    def mean_for_class(self, clazz: int) -> float:
+    def mean_for_class(self, clazz: int) -> Tensor:
         assert isinstance(clazz, int) and clazz >= 0 and clazz < self.num_classes
-        extent = self.num_classes * 6. # We'll space normal distributions apart by 6 with an sd of 0.5
-        return -1/2*extent + clazz*6. + 3.
+        return self.cond_means[clazz]
     
 
-    def scale_for_class(self, clazz: int) -> float:
-        return 0.5 # Currently, we will use the exact same for each and every feature.
+    def log_scale_for_class(self, clazz: int) -> Tensor:
+        assert isinstance(clazz, int) and clazz >= 0 and clazz < self.num_classes
+        return self.cond_log_scales[clazz]
     
 
     def ctx_endoder(self, classes: Tensor) -> Tensor:
@@ -57,9 +72,9 @@ class CalasFlow(nn.Module):
 
         clz_1hot = nn.functional.one_hot(clz_int, self.num_classes)
         means_1hot = torch.atleast_2d(
-            (self._cond_means.repeat(clz_int.numel(), 1) * clz_1hot).sum(dim=1)).T.repeat(1, self.num_dims)
+            (self.cond_means.repeat(clz_int.numel(), 1) * clz_1hot).sum(dim=1)).T.repeat(1, self.num_dims)
         log_scales_1hot = torch.atleast_2d(
-            (self._cond_log_scales.repeat(clz_int.numel(), 1) * clz_1hot).sum(dim=1)).T.repeat(1, self.num_dims)
+            (self.cond_log_scales.repeat(clz_int.numel(), 1) * clz_1hot).sum(dim=1)).T.repeat(1, self.num_dims)
 
         return torch.hstack((means_1hot, log_scales_1hot))
     
@@ -97,7 +112,8 @@ class CalasFlow(nn.Module):
     
 
     def log_rel_lik(self, input: Tensor, classes: Tensor) -> Tensor:
-        return self.log_rel_lik_emb(embeddings=self.x_to_e(input=input), classes=classes)
+        emb = self.x_to_e(input=input)
+        return self.log_rel_lik_emb(embeddings=emb, classes=classes)
     
 
     def log_rel_lik_emb(self, embeddings: Tensor, classes: Tensor) -> Tensor:
@@ -143,7 +159,7 @@ class CalasFlow(nn.Module):
         Returns a tuple of samples, their log probabilities, and the classes of the samples.
         """
         if classes is None:
-            classes = torch.randint(low=0, high=self.num_classes, size=(n_samp,), device=self.dev).to(dtype=torch.int64).squeeze()
+            classes = torch.randint(low=0, high=self.num_classes, size=(n_samp,)).to(device=self.dev, dtype=torch.int64).squeeze()
         
         return *self.flow.sample(num_samples=n_samp, context=self.ctx_endoder(classes=classes)), classes
     
@@ -240,8 +256,8 @@ class CalasFlow(nn.Module):
 
 
 class CalasFlowWithRepr(CalasFlow):
-    def __init__(self, num_classes: int, flows: list[Flow], repr: Union[Representation, RepresentationWithReconstruct], dev: device=device('cpu'), *args, **kwargs):
-        super().__init__(num_dims=repr.embed_dim, num_classes=num_classes, flows=flows, dev=dev, *args, **kwargs)
+    def __init__(self, num_classes: int, flows: list[Flow], repr: Union[Representation, ReconstructableRepresentation], *args, **kwargs):
+        super().__init__(num_dims=repr.embed_dim, num_classes=num_classes, flows=flows, *args, **kwargs)
 
         self.repr = repr
     
@@ -249,16 +265,13 @@ class CalasFlowWithRepr(CalasFlow):
     @property
     @override
     def can_reconstruct(self) -> bool:
-        return isinstance(self.repr, RepresentationWithReconstruct)
-
-    @override
-    def log_rel_lik(self, input: Tensor, classes: Tensor) -> Tensor:
-        embedded = self.repr.embed(x=input)
-        return self.log_rel_lik_emb(embeddings=embedded, classes=classes)
+        return isinstance(self.repr, ReconstructableRepresentation)
+    
     
     @override
     def x_to_e(self, input: Tensor) -> Tensor:
         return self.repr.embed(x=input)
+    
     
     @override
     def x_from_e(self, embeddings: Tensor) -> Tensor:
@@ -266,11 +279,11 @@ class CalasFlowWithRepr(CalasFlow):
         return self.repr.reconstruct(embeddings=embeddings)
 
 
-    def make_random_cod_anomaly(self) -> Tensor:
-        pass
+    # def make_random_cod_anomaly(self) -> Tensor:
+    #     pass
 
-    def make_random_cod_anomaly_emb(self) -> Tensor:
-        pass
+    # def make_random_cod_anomaly_emb(self) -> Tensor:
+    #     pass
     
     def make_CoD_batch_random_emb(self, nominal: Tensor, classes: Tensor, distr: Literal['Normal', 'Uniform']|None=None, num_dims: tuple[int,int]=(0,1), mode: Literal['replace', 'add']|None=None, use_grad_dir: bool|None=None, normalize: bool|None=True, verbose: bool=False) -> Tensor:
         embedded = self.x_to_e(input=nominal).detach_()
