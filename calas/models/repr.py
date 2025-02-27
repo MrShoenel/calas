@@ -71,3 +71,29 @@ class ReconstructableRepresentation(Representation):
             input=torch.log(i), target=i_prime, log_target=False)
 
 
+
+class Identity(ReconstructableRepresentation):
+    """
+    A simple reconstruction that is the identity. It does not modify its inputs
+    or outputs in any way. The decoder is the identity, too, such that the
+    reconstruction is identical to its embedding.
+    """
+    def __init__(self, input_dim: int, *args, **kwargs):
+        super().__init__(input_dim=input_dim, *args, **kwargs)
+        class ID(nn.Module):
+            def forward(self, x): x
+        self._decoder = ID()
+    
+    @property
+    @override
+    def decoder(self) -> nn.Module:
+        return self._decoder
+
+    @property
+    @override
+    def embed_dim(self) -> int:
+        return self.input_dim
+    
+    @override
+    def embed(self, x: Tensor) -> Tensor:
+        return x
