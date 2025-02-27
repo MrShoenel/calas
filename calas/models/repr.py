@@ -1,6 +1,7 @@
 import torch
 from torch import nn, Tensor
 from abc import ABC, abstractmethod
+from typing import override
 
 
 class Representation(nn.Module, ABC):
@@ -19,22 +20,22 @@ class Representation(nn.Module, ABC):
         ... # pragma: no cover
 
 
-    @abstractmethod
     def forward(self, x: Tensor) -> Tensor:
         """Alias for `embed()`."""
-        ... # pragma: no cover
+        return self.embed(x=x)
     
 
+    @abstractmethod
     def embed(self, x: Tensor) -> Tensor:
         """
         Takes input from the original data space (X) and embeds it in some custom
         representation that usually has a different number of dimensions.
         """
-        return self.forward(x=x)
+        ... # pragma: no cover
 
 
 
-class RepresentationWithReconstruct(Representation):
+class ReconstructableRepresentation(Representation):
     @property
     @abstractmethod
     def decoder(self) -> nn.Module:
@@ -52,7 +53,7 @@ class RepresentationWithReconstruct(Representation):
         of the given embeddings here is the same as the result from `forward()`
         (or `embed()`).
         """
-        result: Tensor = self.decoder.forward(embeddings)
+        result: Tensor = self.decoder(embeddings)
         assert result.dim() == 2 and result.shape[0] == embeddings.shape[0] and result.shape[1] == self.input_dim
         return result
 
