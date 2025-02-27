@@ -3,7 +3,7 @@ from torch import nn, Tensor
 from normflows.flows import Flow, AutoregressiveRationalQuadraticSpline, LULinearPermute
 from calas.models.flow import CalasFlow, CalasFlowWithRepr
 from calas.tools.two_moons import two_moons_rejection_sampling, two_moons_likelihood, pure_two_moons_likelihood
-from calas.models.repr import RepresentationWithReconstruct
+from calas.models.repr import ReconstructableRepresentation
 from typing import override, Sequence
 
 
@@ -19,7 +19,7 @@ def make_flows(K: int=4, dim: int=2, units: int=128, layers: int=2) -> list[Flow
 
 
 
-class AE_UNet_Repr(RepresentationWithReconstruct):
+class AE_UNet_Repr(ReconstructableRepresentation):
     def __init__(self, input_dim, hidden_sizes: Sequence[int], *args, **kwargs):
         super().__init__(input_dim, *args, **kwargs)
 
@@ -36,6 +36,8 @@ class AE_UNet_Repr(RepresentationWithReconstruct):
             mods.append(nn.Linear(in_features=num_in, out_features=num_out, bias=True))
             mods.append(nn.SiLU())
             self.hidden_modules.append(nn.Sequential(*mods))
+            # Register modules on self, so nn.Module can properly handle them!
+            setattr(self, f'block_{idx}', self.hidden_modules[-1])
 
         self._decoder = nn.Linear(in_features=sum(self.hidden_sizes), out_features=self.input_dim, bias=True)
     
@@ -49,9 +51,9 @@ class AE_UNet_Repr(RepresentationWithReconstruct):
     @override
     def decoder(self) -> nn.Module:
         return self._decoder
-
+    
     @override
-    def forward(self, x: Tensor) -> Tensor:
+    def embed(self, x: Tensor) -> Tensor:
         reprs: list[Tensor] = []
         prev: Tensor = x
         for seq in self.hidden_modules:
