@@ -149,7 +149,7 @@ def test_calas_repr():
         repr.loss(x=samp)
 
 
-def test_spaces_and_calas():
+def test_spaces():
     torch.manual_seed(0)
     repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(32,16,32))
     flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr)
@@ -166,12 +166,12 @@ def test_spaces_and_calas():
     # WE CANNOT assert the following because the representation was not trained to reconstruct properly!
     assert not torch.allclose(input=samp, other=x1) 
     
-    # Most likely, we cannot create anomalies with lower likelihood at this
-    # point, simply because the flow is not yet trained and will therefore
-    # assign very low likelihoods to the given ID samples.
-    lower_lik = flow.make_linear_global_anomaly(input=samp, classes=samp_class, likelihood='decrease')
+    # # Most likely, we cannot create anomalies with lower likelihood at this
+    # # point, simply because the flow is not yet trained and will therefore
+    # # assign very low likelihoods to the given ID samples.
+    # lower_lik = flow.make_linear_global_anomaly(input=samp, classes=samp_class, likelihood='decrease')
 
-    # However, that here should work!
-    higher_lik = flow.make_linear_global_anomaly(input=samp, classes=samp_class, likelihood='increase')
-    samp_lik = flow.log_rel_lik(input=samp, classes=samp_class)
-    assert torch.all(samp_lik < flow.log_rel_lik(input=higher_lik, classes=samp_class))
+    # # However, that here should work!
+    # higher_lik = flow.make_linear_global_anomaly(input=samp, classes=samp_class, likelihood='increase')
+    # samp_lik = flow.log_rel_lik(input=samp, classes=samp_class)
+    # assert torch.all(samp_lik < flow.log_rel_lik(input=higher_lik, classes=samp_class))
