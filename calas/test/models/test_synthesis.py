@@ -78,7 +78,7 @@ def test_linear_e2e():
             break
     
 
-    with Linear(flow=flow) as linear:
+    with Linear(flow=flow, space_in='X', space_out='E') as linear:
         holdout, holdout_clz = samp[n_samp:], samp_class[n_samp:]
         temp = flow.log_rel_lik(input=holdout, classes=holdout_clz)
         avg_lik = temp.mean()
@@ -92,6 +92,8 @@ def test_linear_e2e():
         # because the flow is somewhat trained and, therefore, we should be able
         # to essentially push samples almost arbitrarily far away!
         min_lik = temp.min()
+
+        worse_emb = linear.modify2(batch=holdout, classes=holdout_clz, target_lik=min_lik - 2*sd, condition='lower_than', return_all=True, perc_change=0.01)
+        assert torch.all(flow.log_rel_lik_emb(embeddings=worse_emb, classes=holdout_clz) < min_lik)
         
-        worse = linear.modify(sample=holdout, classes=holdout_clz, target_lik=min_lik - 2*sd, condition='lower_than', return_all=True, perc_change=0.05)
-        assert torch.all(flow.log_rel_lik(input=worse, classes=holdout_clz) < min_lik)
+        # worse_emb = linear.modify(sample=holdout, classes=holdout_clz, target_lik=min_lik - 2*sd, condition='lower_than', return_all=True, perc_change=0.05)

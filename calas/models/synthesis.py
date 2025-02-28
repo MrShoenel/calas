@@ -49,17 +49,91 @@ class Linear(Synthesis[T]):
             scale=torch.exp(self.flow.log_scale_for_class(clazz=clz).repeat(self.flow.num_dims))) for clz in range(flow.num_classes) }
     
 
+    def log_rel_lik_emb_unagg(self, embeddings: Tensor, clz: Tensor) -> tuple[Tensor, Tensor]:
+        b, b_log_det = self.flow.e_to_b(embeddings=embeddings, classes=clz)
+        return torch.vstack(tensors=list(
+            self.normals[clz[idx].item()].log_prob(value=b[idx]) for idx in range(embeddings.shape[0])
+        )), (b_log_det / b.shape[1]).unsqueeze(dim=0).T.repeat(1, b.shape[1])
+
+    
+
     def modify2(self, batch: Tensor, classes: Tensor, target_lik: float, condition: Literal['concentrate', 'lower_than', 'greater_than'], concentrate_dim_log_tol: float=1.0, perc_change: float=0.003, return_all: bool=False) -> Tensor:
         """
         Linear modification always happens in the embedding space, as there are
-        no guarantees at this point that the reconstruction is faithful.
+        no guarantees at this point that the reconstruction is faithful. That
+        means that the modified batch is always returned in the embedding space.
         """
-        org_shape = batch.shape
+        flow = self.flow
         assert isinstance(batch, Tensor) and batch.dim() == 2 and batch.shape[0] > 0, 'sample needs to be a non-empty 2D Tensor'
-        if self.space_in == 'X':
-            batch = self.flow.x_to_b(input=batch, classes=classes)
+        if self.space_in == 'X': # This here method only operates in E space!
+            batch = flow.x_to_e(input=batch)
         clz_int = classes.squeeze().to(dtype=torch.int64, device=batch.device)
+        batch_shape = batch.shape
         embedded = batch.clone().detach()
+
+        results_unacc: list[Tensor] = []
+        results: list[Tensor] = []
+        steps = 0
+        while steps < 20 and embedded.shape[0] > 0:
+            steps += 1
+            b_batch = flow.e_to_b(embeddings=embedded, classes=clz_int)[0]
+            u = 1e-5 + torch.rand_like(b_batch) * perc_change # ~(0, 0.3]% change/step
+            
+            q = torch.vstack(tensors=list(
+                self.normals[clz_int[idx].item()].cdf(b_batch[idx]) for idx in range(b_batch.shape[0])))
+            
+            if condition == 'lower_than':
+                # Check if the quantiles already reside at the extremes and skip those samples,
+                # as we cannot make them worse.
+                mask_exclude = torch.where((q.min(dim=1).values < 1e-7) | (q.max(dim=1).values > 1.-1e-7), True, False)
+                if torch.any(mask_exclude).item():
+                    results_unacc.append(embedded[mask_exclude])
+                    embedded = embedded[~mask_exclude]
+                    clz_int = clz_int[~mask_exclude]
+                    continue
+            
+            # The following lambda tells us about which side of the normal distr.
+            # we're on. One could also say that it indicates the sign of the gradient.
+            lamb = torch.where(q < 0.5, 1., -1.).to(dtype=q.dtype)
+            if condition == 'concentrate':
+                b_batch_unagg_likelihood, b_batch_unagg_log_det =\
+                    self.log_rel_lik_emb_unagg(embeddings=embedded, clz=clz_int)
+                b_batch_unagg_likelihood += b_batch_unagg_log_det
+                lamb *= torch.sign(input=(target_lik / b_batch.shape[1]) - b_batch_unagg_likelihood)
+            else:
+                lamb *= 1. if condition == 'greater_than' else -1.
+            
+            q_prime = q + lamb * u
+            # Modify b according to the condition and target.
+            b_prime = torch.vstack(tensors=list(
+                self.normals[clz_int[idx].item()].icdf(Linear._icdf_safe(
+                    q=q_prime[idx])) for idx in range(b_batch.shape[0])))
+            
+            # Now we inverse and forward the modified base and check the resulting likelihoods!
+            # TODO: Check if the following is double work!
+            embedded_prime, eld = self.flow.e_from_b(base=b_prime, classes=clz_int)
+            embedded_prime_liks = self.flow.log_rel_lik_emb(embeddings=embedded_prime, classes=clz_int)
+
+            mask_accept: Tensor = None
+            if condition == 'concentrate':
+                # 'concentrate_dim_log_tol' is per dimension, so we got to sum this up.
+                mask_accept = torch.where(torch.abs(embedded_prime_liks - target_lik) < concentrate_dim_log_tol, True, False)
+            else:
+                mask_accept = torch.where(embedded_prime_liks < target_lik, True, False) if condition == 'lower_than' else torch.where(embedded_prime_liks > target_lik, True, False)
+            
+            done = embedded_prime[mask_accept]
+            if done.shape[0] > 0:
+                results.append(done)
+            clz_int = clz_int[~mask_accept]
+            embedded = embedded_prime[~mask_accept]
+        
+        n_results = lambda: sum(r.shape[0] for r in results)
+        if n_results() < batch_shape[0]:
+            if return_all:
+                results.append(embedded_prime) # Return even those that were not accepted
+            if n_results() == 0:
+                return torch.empty((0, batch_shape[1]))
+        return torch.vstack(tensors=results)
 
 
 
@@ -134,10 +208,11 @@ class Linear(Synthesis[T]):
             else:
                 lamb *= 1. if condition == 'greater_than' else -1.
             
+            q_prime = q + lamb * u
             # Modify b according to the condition and target.
             b_prime = torch.vstack(tensors=list(
                 normals[clz_int[idx].item()].icdf(Linear._icdf_safe(
-                    q=q[idx] + lamb[idx] * u[idx])) for idx in range(b_batch.shape[0])))
+                    q=q_prime[idx])) for idx in range(b_batch.shape[0])))
             
             # Now we inverse and forward the modified and check the resulting likelihoods!
             samp_prime = from_b(b=b_prime, clz=clz_int)
