@@ -79,8 +79,8 @@ def test_calas():
     use_C = torch.tensor([0,0,0,0,0, 1,1,1,1,1])
     use_X = torch.rand((10,2))
 
-    b, _ = flow.e_to_b(embeddings=use_X, classes=use_C)
-    x, _ = flow.e_from_b(base=b, classes=use_C)
+    b, _ = flow.E_to_B(embeddings=use_X, classes=use_C)
+    x, _ = flow.E_from_B(base=b, classes=use_C)
     assert torch.allclose(input=use_X, other=x)
 
 
@@ -117,7 +117,7 @@ def test_calas_repr():
     classes_anomaly = torch.ones(samp_cod.shape[0], device=samp_cod.device)
     total_loss =\
         flow.loss(input=samp, classes=classes_nominal) +\
-        flow.loss_emb(embeddings=samp_cod, classes=classes_anomaly) +\
+        flow.loss_E(embeddings=samp_cod, classes=classes_anomaly) +\
         repr.loss(x=samp)
     
     # The first loss is about the nominal samples under the nominal class. It also
@@ -138,8 +138,8 @@ def test_calas_repr():
     # batch, we are deliberately detaching it. Now the only loss that really has
     # an impact on the representation is its own loss (here: the 3rd).
     total_loss =\
-        flow.loss_emb(embeddings=repr.forward(x=samp).detach(), classes=classes_nominal) +\
-        flow.loss_emb(embeddings=samp_cod, classes=classes_anomaly) +\
+        flow.loss_E(embeddings=repr.forward(x=samp).detach(), classes=classes_nominal) +\
+        flow.loss_E(embeddings=samp_cod, classes=classes_anomaly) +\
         repr.loss(x=samp)
     
     
@@ -162,10 +162,10 @@ def test_spaces():
     samp = two_moons_rejection_sampling(nsamples=10)
     samp_class = torch.full((10,), 0.)
     
-    e  = flow.x_to_e(input=samp)
-    b  = flow.e_to_b(embeddings=e, classes=samp_class)[0]
-    e1 = flow.e_from_b(base=b, classes=samp_class)[0]
-    x1 = flow.x_from_e(embeddings=e1)
+    e  = flow.X_to_E(input=samp)
+    b  = flow.E_to_B(embeddings=e, classes=samp_class)[0]
+    e1 = flow.E_from_B(base=b, classes=samp_class)[0]
+    x1 = flow.X_from_E(embeddings=e1)
 
     assert torch.allclose(input=e, other=e1, atol=1e-7)
     # WE CANNOT assert the following because the representation was not trained to reconstruct properly!

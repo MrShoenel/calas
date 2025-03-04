@@ -31,8 +31,11 @@ class CalasFlow(nn.Module):
         self.register_buffer(name='cond_means', tensor=torch.tensor(list(-1/2*extent + i*6. + 3. for i in range(self.num_classes))))
         self.register_buffer(name='cond_log_scales', tensor=torch.log(torch.tensor([0.5]*self.num_classes)))
 
-        self._loss_grad_wrt_inputs = jacrev(func=self.loss)
-        self._loss_emb_grad_wrt_inputs = jacrev(func=self.loss_emb)
+        self._loss_grad_wrt_X = jacrev(func=self.loss)
+        self._loss_grad_wrt_E = jacrev(func=self.loss_E)
+        self._loss_grad_wrt_B = jacrev(func=self.loss_B)
+
+        # TODO: Perhaps implement static translation according to conditional means
     
 
     @override
@@ -58,6 +61,8 @@ class CalasFlow(nn.Module):
 
     @property
     def can_reconstruct(self) -> bool:
+        # TODO: This should perhaps return True for a flow without repr.
+        # We shouldn't probably use this property on a flow at all.
         return False
     
 
@@ -90,7 +95,7 @@ class CalasFlow(nn.Module):
         return torch.hstack((means_1hot, log_scales_1hot))
     
 
-    def x_to_e(self, input: Tensor) -> Tensor:
+    def X_to_E(self, input: Tensor) -> Tensor:
         """
         Forward pass, from data/input space (X) to representation/embedding space (E).
         This flow does not use a representation, so X=E and this function is the identity.
@@ -98,17 +103,17 @@ class CalasFlow(nn.Module):
         return input
     
 
-    def x_to_b(self, input: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
+    def X_to_B(self, input: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
         """
         Convenience method that performs a full pass from data/input space (X) to base
         space (B), by also passing the X through the representation/embedding space (E)
-        first.
+        first, i.e., X -> E -> B.
         """
-        emb = self.x_to_e(input=input)
-        return self.e_to_b(embeddings=emb, classes=classes)
+        emb = self.X_to_E(input=input)
+        return self.E_to_B(embeddings=emb, classes=classes)
     
 
-    def x_from_e(self, embeddings: Tensor) -> Tensor:
+    def X_from_E(self, embeddings: Tensor) -> Tensor:
         """
         Inverse pass, from representation/embedding space (E) to data/input space (X).
         This flow does not use a representation, so E=X and this function is the identity.
@@ -116,7 +121,7 @@ class CalasFlow(nn.Module):
         return embeddings
 
 
-    def e_to_b(self, embeddings: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
+    def E_to_B(self, embeddings: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
         """
         Forward-pass, from data space (X)representation/embedding space (E) to base space (B).
         Returns the result in the base space and the log-determinant.
@@ -124,7 +129,7 @@ class CalasFlow(nn.Module):
         return self.flow.inverse_and_log_det(x=embeddings, context=self.ctx_endoder(classes=classes))
     
 
-    def e_from_b(self, base: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
+    def E_from_B(self, base: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
         """
         Inverse pass, from base space (B) to representation/embedding space (E).
         Returns the result in the representation/embedding space and the log-determinant.
@@ -132,18 +137,18 @@ class CalasFlow(nn.Module):
         return self.flow.forward_and_log_det(z=base, context=self.ctx_endoder(classes=classes))
     
 
-    def x_from_b(self, base: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
+    def X_from_B(self, base: Tensor, classes: Tensor) -> tuple[Tensor, Tensor]:
         """
         Convenience method that performs a full pass from base space (B) all the way back
-        to the input/data space (X), by also passing X through the representation/embedding
-        space (E) first.
+        to the input/data space (X), by also passing B through the representation/embedding
+        space (E) first, i.e., B -> E -> X.
         """
-        emb, log_det = self.e_from_b(base=base, classes=classes)
-        return self.x_from_e(embeddings=emb), log_det
+        emb, log_det = self.E_from_B(base=base, classes=classes)
+        return self.X_from_E(embeddings=emb), log_det
     
 
     def log_rel_lik(self, input: Tensor, classes: Tensor) -> Tensor:
-        emb = self.x_to_e(input=input)
+        emb = self.X_to_E(input=input)
         return self.log_rel_lik_emb(embeddings=emb, classes=classes)
     
 
@@ -158,11 +163,16 @@ class CalasFlow(nn.Module):
         calculate their average negative log likelihood under the base (B)
         distribution.
         """
-        emb = self.x_to_e(input=input)
-        return self.loss_emb(embeddings=emb, classes=classes)
+        emb = self.X_to_E(input=input)
+        return self.loss_E(embeddings=emb, classes=classes)
     
 
-    def loss_emb(self, embeddings: Tensor, classes: Tensor) -> Tensor:
+    def loss_X(self, input: Tensor, classes: Tensor) -> Tensor:
+        """Alias for loss()."""
+        return self.loss(input=input, classes=classes)
+    
+
+    def loss_E(self, embeddings: Tensor, classes: Tensor) -> Tensor:
         """
         Computes the forward KL divergence (we estimate the expectation using
         Monte Carlo). In other words, given samples in the representation/
@@ -172,13 +182,22 @@ class CalasFlow(nn.Module):
         return -torch.mean(input=self.log_rel_lik_emb(embeddings=embeddings, classes=classes))
     
 
+    def loss_mu_sigma_B(self, base: Tensor, classes: Tensor) -> Tensor:
+        return self.los
+    
+
+    def loss_B(self, base: Tensor, classes: Tensor) -> Tensor:
+        emb = self.E_from_B(base=base, classes=classes)[0]
+        return self.loss_E(embeddings=emb, classes=classes)
+    
+
     def sample(self, n_samp: int, classes: Optional[Tensor]=None) -> tuple[Tensor, Tensor, Tensor]:
         """
         Calls `sample_e()` and transforms the sampled embeddings back to the
         original data space (X).
         """
         samp_emb, log_liks, clazzes = self.sample_emb(n_samp=n_samp, classes=classes)
-        return self.x_from_e(embeddings=samp_emb), log_liks, clazzes
+        return self.X_from_E(embeddings=samp_emb), log_liks, clazzes
     
 
     def sample_emb(self, n_samp: int, classes: Optional[Tensor]=None) -> tuple[Tensor, Tensor, Tensor]:
@@ -197,25 +216,35 @@ class CalasFlow(nn.Module):
 
     @final
     def forward(self, *args, **kwargs) -> None:
-        raise Exception('Intent not clear, call, e.g., x_to_e, log_prob, loss, ..., etc.')
+        raise Exception('Intent not clear, call, e.g., X_to_E, log_prob, loss, ..., etc.')
     
 
-    def loss_grad_wrt_input(self, embedded: Tensor, classes: Tensor) -> Tensor:
+    def loss_grad_wrt_X(self, inputs: Tensor, classes: Tensor) -> Tensor:
+        """
+        The derivative of this flow's loss with regard to the inputs (here: original data space).
+        This function tells us how the inputs (*not* the flow's parameters) in the original data
+        space need to be changed in order to increase/decrease the resulting loss.
+        """
+        return self._loss_grad_wrt_X(inputs, classes)
+    
+
+    def loss_grad_wrt_E(self, embedded: Tensor, classes: Tensor) -> Tensor:
         """
         The derivative of this flow's loss with regard to the inputs (here: the embeddings).
         This function tells us how the inputs (*not* the flow's parameters) in the embedding
         space need to be changed in order to increase/decrease the resulting loss.
         """
-        return self._loss_grad_wrt_inputs(embedded, classes)
+        return self._loss_grad_wrt_E(embedded, classes)
     
 
-    def loss_emb_grad_wrt_input(self, embedded: Tensor, classes: Tensor) -> Tensor:
+    def loss_grad_wrt_B(self, base: Tensor, classes: Tensor) -> Tensor:
         """
-        The derivative of this flow's loss with regard to the inputs (here: the embeddings).
-        This function tells us how the inputs (*not* the flow's parameters) in the embedding
-        space need to be changed in order to increase/decrease the resulting loss.
+        The derivative of this flow's loss with regard to base space (B). This function tells
+        use how the sample in B space (*not* the flow's parameters) need to be changed in order
+        to increase/decrease the resulting loss.
         """
-        return self._loss_emb_grad_wrt_inputs(embedded, classes)
+        return self._loss_grad_wrt_B(base, classes)
+
 
 
 
@@ -247,12 +276,12 @@ class CalasFlowWithRepr(CalasFlow):
     
     
     @override
-    def x_to_e(self, input: Tensor) -> Tensor:
+    def X_to_E(self, input: Tensor) -> Tensor:
         return self.repr.embed(x=input)
     
     
     @override
-    def x_from_e(self, embeddings: Tensor) -> Tensor:
+    def X_from_E(self, embeddings: Tensor) -> Tensor:
         assert self.can_reconstruct, 'Can only sample if the representation supports reconstruction.'
         return self.repr.reconstruct(embeddings=embeddings)
 
@@ -264,7 +293,7 @@ class CalasFlowWithRepr(CalasFlow):
     #     pass
     
     def make_CoD_batch_random_emb(self, nominal: Tensor, classes: Tensor, distr: Literal['Normal', 'Uniform']|None=None, num_dims: tuple[int,int]=(0,1), mode: Literal['replace', 'add']|None=None, use_grad_dir: bool|None=None, normalize: bool|None=True, verbose: bool=False) -> Tensor:
-        embedded = self.x_to_e(input=nominal).detach_()
+        embedded = self.X_to_E(input=nominal).detach_()
         # Note that the norm is for each sample!
         mean, std, norm = embedded.mean(dim=0), embedded.std(dim=0), torch.atleast_2d(embedded.norm(dim=1, p=1)).T
         
@@ -282,7 +311,7 @@ class CalasFlowWithRepr(CalasFlow):
             embedded.requires_grad = True
             was_training = self.training
             self.eval()
-            grad = self.loss_emb_grad_wrt_input(embedded=embedded, classes=classes)
+            grad = self.loss_grad_wrt_E(embedded=embedded, classes=classes)
             if was_training:
                 self.train()
             cod = (torch.sign(grad) * torch.abs(cod)).detach()

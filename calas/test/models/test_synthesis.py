@@ -72,7 +72,7 @@ def test_linear_e2e():
         # The goal is for the flow to learn to push the class-0 (ID) data towards
         # its conditional mean in the B-space, which is at -3! We want to stop
         # this training if the training data is (at least mostly) close to that.
-        b = flow.x_to_b(input=samp[0:batch_size], classes=samp_class[0:batch_size])[0]
+        b = flow.X_to_B(input=samp[0:batch_size], classes=samp_class[0:batch_size])[0]
         if torch.abs(b.mean() + 3) < .3:
             # Stop training, we're close enough now.
             break
@@ -93,7 +93,75 @@ def test_linear_e2e():
         # to essentially push samples almost arbitrarily far away!
         min_lik = temp.min()
 
-        worse_emb = linear.modify2(batch=holdout, classes=holdout_clz, target_lik=min_lik - 2*sd, condition='lower_than', return_all=True, perc_change=0.01)
-        assert torch.all(flow.log_rel_lik_emb(embeddings=worse_emb, classes=holdout_clz) < min_lik)
+        worse_emb, worse_clz = linear.modify3(batch=holdout, classes=holdout_clz, target_lik=min_lik - 2*sd, condition='lower_than', return_all=True, u_min=0.0, u_max=0.3, max_steps=100)
+        assert torch.all(flow.log_rel_lik_emb(embeddings=worse_emb, classes=worse_clz) < min_lik)
         
         # worse_emb = linear.modify(sample=holdout, classes=holdout_clz, target_lik=min_lik - 2*sd, condition='lower_than', return_all=True, perc_change=0.05)
+
+
+def test_Normal2Normal():
+    from calas.models.synthesis import Normal2Normal
+
+    torch.manual_seed(0)
+    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
+    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
+    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
+    samp_class = torch.full((100,), 0.).to(device=dev)
+
+    n2n = Normal2Normal(flow=flow, seed=0)
+    n2n.permute(embeddings=flow.X_to_E(samp), classes=samp_class, likelihood='decrease')
+
+
+def test_GradientPerm():
+    from calas.models.synthesis import GradientPerm_in_B
+
+    torch.manual_seed(0)
+    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
+    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
+    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
+    samp_class = torch.full((100,), 0.).to(device=dev)
+
+    gp = GradientPerm_in_B(flow=flow, seed=0, u_min=0.01, u_max=0.01)
+    gp.permute(embeddings=flow.X_to_E(samp), classes=samp_class, likelihood='decrease')
+
+
+
+def test_GradientQofB():
+    from calas.models.synthesis import GradientPerm_in_QofB
+
+    torch.manual_seed(0)
+    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
+    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
+    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
+    samp_class = torch.full((100,), 0.).to(device=dev)
+
+    gqb = GradientPerm_in_QofB(flow=flow, seed=0, u_min=0.01, u_max=0.01, scale_grad=True)
+    gqb.permute(embeddings=flow.X_to_E(samp), classes=samp_class, likelihood='increase')
+
+
+
+def test_LinearPerm():
+    from calas.models.synthesis import LinearPerm_in_B
+
+    torch.manual_seed(0)
+    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
+    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
+    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
+    samp_class = torch.full((100,), 0.).to(device=dev)
+
+    lp = LinearPerm_in_B(flow=flow, seed=0, u_min=0.001, u_max=0.001)
+    lp.permute(embeddings=flow.X_to_E(samp), classes=samp_class, likelihood='decrease')
+
+
+
+def test_Normal2NormalGrad():
+    from calas.models.synthesis import Normal2NormalGrad
+
+    torch.manual_seed(0)
+    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
+    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
+    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
+    samp_class = torch.full((100,), 0.).to(device=dev)
+
+    n2ng = Normal2NormalGrad(flow=flow, seed=0, u_min=0.025, u_max=0.05)
+    n2ng.permute(embeddings=flow.X_to_E(samp), classes=samp_class, likelihood='decrease')

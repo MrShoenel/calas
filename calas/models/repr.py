@@ -84,7 +84,7 @@ class Identity(ReconstructableRepresentation):
     def __init__(self, input_dim: int, *args, **kwargs):
         super().__init__(input_dim=input_dim, *args, **kwargs)
         class ID(nn.Module):
-            def forward(self, x): x
+            def forward(self, x): return x
         self._decoder = ID()
     
     @property
