@@ -147,3 +147,7 @@ class AE_UNet_Repr(ReconstructableRepresentation):
             reprs.append(seq(prev))
             prev = reprs[-1]
         return torch.hstack(reprs)
+
+
+class DimRed_PCA_Invertible_AE(ReconstructableRepresentation):
+    pass
