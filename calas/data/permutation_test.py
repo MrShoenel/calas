@@ -6,7 +6,7 @@ from ..tools.two_moons import two_moons_rejection_sampling
 from ..models.flow_test import make_flows
 from ..models.repr import AE_UNet_Repr
 from ..tools.func import normal_cdf, normal_ppf_safe
-from .permutation import Space, Likelihood, LocsScales, Data2Data_Grad, Normal2Normal_Grad, Normal2Normal_NoGrad, CurseOfDimDataPermute
+from .permutation import Space, Likelihood, LocsScales, Data2Data_Grad, Normal2Normal_Grad, Normal2Normal_NoGrad, CurseOfDimDataPermute, PermuteDims
 from pytest import mark
 from typing import Callable
 
@@ -157,3 +157,28 @@ def test_CurseOfDimDataPermute(use_grad_dir: bool, space: Space):
         assert (num_worse / samp.shape[0]) > 0.51
     else:
         assert (num_worse / samp.shape[0]) > 0.70
+
+
+def test_PermuteDims():
+    torch.manual_seed(0)
+    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(8,4,8))
+    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
+    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
+    samp_class = torch.full((100,), 0.).to(device=dev)
+    samp_b = flow.X_to_E(samp)
+
+    with pytest.warns(Warning):
+        pd = PermuteDims(flow=flow, space=Space.Base, num_dims=(10,flow.num_dims), change_prob=0.999)
+        perm_b = pd.permute(batch=samp_b)
+
+        # For a normalizing flow, permuting dimensions in E or B has *no* effect (!!)
+        before, after = flow.log_rel_lik_B(samp_b, samp_class), flow.log_rel_lik_B(perm_b, samp_class)
+        assert torch.allclose(before, after, atol=1e-4)
+
+
+    pdx = PermuteDims(flow=flow, space=Space.Data, num_dims=(2,2), change_prob=1.0)
+    perm = pdx.permute(batch=samp)
+
+    before, after = flow.log_rel_lik_X(samp, samp_class), flow.log_rel_lik_X(perm, samp_class)
+    # There should be quite a big difference!
+    assert torch.abs(before - after).min() > 1.
