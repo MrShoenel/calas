@@ -1,291 +1,94 @@
 import torch
 from torch import Tensor
-from torch.distributions.normal import Normal
-from typing import Literal
+from typing import Self
+from ..data.permutation import Likelihood, Permute, Space, T
 
 
-class Linear():
 
-    @staticmethod
-    def _icdf_safe(q: Tensor, tol: float=1e-7) -> Tensor:
-        if q.dtype.itemsize < 4:
-            tol = 1e-2
-        return torch.clip(input=q, min=tol, max=1.-tol)
-    
-
+class Synthesis:
     def __init__(self, flow: T, space_in: Space, space_out: Space):
-        super().__init__(flow=flow)
-
+        self.perms: list[Permute[T]] = []
+        self.flow = flow
         self.space_in = space_in
         self.space_out = space_out
-        
-        self.normals = { clz: Normal(
-            loc=self.flow.mean_for_class(clazz=clz).repeat(self.flow.num_dims),
-            scale=torch.exp(self.flow.log_scale_for_class(clazz=clz).repeat(self.flow.num_dims))) for clz in range(flow.num_classes) }
     
 
-    def modify3(self, batch: Tensor, classes: Tensor, target_lik: float, condition: Literal['concentrate', 'lower_than', 'greater_than'], concentrate_dim_log_tol: float=1.0, return_all: bool=False, max_steps: int=20, u_min: float=0.02, u_max=0.4) -> Tensor:
-        """
-        Linear modification always happens in the embedding space, as there are
-        no guarantees at this point that the reconstruction is faithful. That
-        means that the modified batch is always returned in the embedding space.
-        """
-        flow = self.flow
-        assert isinstance(batch, Tensor) and batch.dim() == 2 and batch.shape[0] > 0, 'sample needs to be a non-empty 2D Tensor'
-        if self.space_in == 'X': # This here method only operates in E space!
-            batch = flow.X_to_E(input=batch)
-        clz_int = classes.squeeze().to(dtype=torch.int64, device=batch.device)
-        batch_shape = batch.shape
-        embedded = batch.clone().detach()
-        liks = flow.log_rel_lik_E(embeddings=embedded, classes=clz_int)
+    def add_permutation(self, perm: Permute[T]) -> Self:
+        self.perms.append(perm)
+        return self
+    
 
+    def log_rel_lik(self, sample: Tensor, classes: Tensor, space: Space) -> Tensor:
+        if space == Space.Data:
+            return self.flow.log_rel_lik_X(input=sample, classes=classes)
+        elif space == Space.Embedded:
+            return self.flow.log_rel_lik_E(embeddings=sample, classes=classes)
+        elif space == Space.Base:
+            return self.flow.log_rel_lik_B(base=sample, classes=classes)
+        raise Exception(f'Space {space} not supported.')
+    
+
+    def space_2_space(self, sample: Tensor, classes: Tensor, old: Space, new: Space) -> Tensor:
+        if old == new:
+            return sample
+        if old == Space.Data:
+            if new == Space.Embedded:
+                return self.flow.X_to_E(input=sample)
+            elif new == Space.Base:
+                return self.flow.X_to_B(input=sample, classes=classes)[0]
+        elif old == Space.Embedded:
+            if new == Space.Data:
+                return self.flow.X_from_E(embeddings=sample)
+            elif new == Space.Base:
+                return self.flow.E_to_B(embeddings=sample, classes=classes)[0]
+        elif old == Space.Base:
+            if new == Space.Data:
+                return self.flow.X_from_B(base=sample, classes=classes)[0]
+            elif new == Space.Embedded:
+                return self.flow.E_from_B(base=sample, classes=classes)[0]
+        raise Exception(f'Going from Space {old} to Space {new} is not supported!')
+    
+
+    def synthesize(self, sample: Tensor, classes: Tensor, target_lik: float, likelihood: Likelihood, max_steps: int=20):
+        assert len(self.perms) > 0
+        clz_int = classes.squeeze().to(dtype=torch.int64)
+        liks = self.log_rel_lik(sample=sample, classes=clz_int, space=self.space_in)
 
         results: list[Tensor] = []
         results_classes: list[Tensor] = []
         steps = 0
-        while steps < max_steps and embedded.shape[0] > 0:
+        while steps < max_steps and sample.shape[0] > 0:
             steps += 1
-            b_batch, b_batch_logdet = flow.E_to_B(embeddings=embedded, classes=clz_int)
-            u = u_min + torch.rand_like(b_batch) * (u_max - u_min)
-            
-            q = torch.vstack(tensors=list(
-                self.normals[clz_int[idx].item()].cdf(b_batch[idx]) for idx in range(b_batch.shape[0])))
-            
-            lamb = torch.where(q < 0.5, 1., -1.).to(dtype=q.dtype)
-            lamb *= 1. if condition == 'greater_than' else -1.
-            
-            q_prime = q + lamb * u
-            q_prime = torch.where((q_prime < .1) | (q_prime > .99), q, q_prime)
-            
-            b_prime = torch.vstack(tensors=list(
-                self.normals[clz_int[idx].item()].icdf(Linear._icdf_safe(
-                    q=q_prime[idx])) for idx in range(b_batch.shape[0])))
-            
-            embedded_prime = self.flow.E_from_B(base=b_prime, classes=clz_int)[0]
-            b_prime_logdet = flow.E_to_B(embeddings=embedded_prime, classes=clz_int)[1]
-            embedded_prime_liks = self.flow.log_rel_lik_E(embeddings=embedded_prime, classes=clz_int)
 
+            old_space = self.space_in
+            for perm in self.perms:
+                # First make sure the to-permute sample is in the correct space!
+                sample_prime = self.space_2_space(sample=sample, classes=clz_int, old=old_space, new=perm.space_in)
+                old_space = perm.space_out
+                
+                sample_prime = perm.permute(batch=sample_prime, classes=clz_int, likelihood=likelihood)
+                sample_prime_liks = self.log_rel_lik(sample=sample_prime, classes=clz_int, space=perm.space_out)
 
-            # First replace those embeddings that are now 'better' (in terms of the condition)
-            mask_replace = torch.where(embedded_prime_liks < liks, True, False) if condition == 'lower_than' else torch.where(embedded_prime_liks > liks, True, False)
+                mask_replace = torch.where(sample_prime_liks < liks, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > liks, True, False)
 
-            if torch.any(mask_replace).item():
-                liks[mask_replace] = embedded_prime_liks[mask_replace]
-                embedded[mask_replace] = embedded_prime[mask_replace]
+                if torch.any(mask_replace).item():
+                    liks[mask_replace] = sample_prime_liks[mask_replace]
+                    sample[mask_replace] = sample_prime[mask_replace]
+                
 
+                mask_accept = torch.where(sample_prime_liks < target_lik, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > target_lik, True, False)
+                
+                if torch.any(mask_accept).item():
+                    results.append(sample_prime[mask_accept])
+                    results_classes.append(clz_int[mask_accept])
+                # Now remove these samples from the to-do list!
+                clz_int = clz_int[~mask_accept]
+                liks = liks[~mask_accept]
+                sample = sample[~mask_accept]
 
-            mask_accept = torch.where(embedded_prime_liks < target_lik, True, False) if condition == 'lower_than' else torch.where(embedded_prime_liks > target_lik, True, False)
-
-            done = embedded_prime[mask_accept]
-            if done.shape[0] > 0:
-                results.append(done)
-                results_classes.append(clz_int[mask_accept])
-            clz_int = clz_int[~mask_accept]
-            liks = liks[~mask_accept]
-            embedded = embedded[~mask_accept]
-
+                if sample.shape[0] == 0:
+                    break
         
+        if len(results) == 0:
+            return torch.empty(size=(0, sample.shape[1]), device=sample.dev), torch.empty(size=(0, classes.shape[1]), device=classes.device)
         return torch.vstack(tensors=results), torch.cat(results_classes)
-
-
-
-    
-
-    def log_rel_lik_emb_unagg(self, embeddings: Tensor, clz: Tensor) -> tuple[Tensor, Tensor]:
-        b, b_log_det = self.flow.E_to_B(embeddings=embeddings, classes=clz)
-        return torch.vstack(tensors=list(
-            self.normals[clz[idx].item()].log_prob(value=b[idx]) for idx in range(embeddings.shape[0])
-        )), (b_log_det / b.shape[1]).unsqueeze(dim=0).T.repeat(1, b.shape[1])
-
-    
-
-    def modify2(self, batch: Tensor, classes: Tensor, target_lik: float, condition: Literal['concentrate', 'lower_than', 'greater_than'], concentrate_dim_log_tol: float=1.0, perc_change: float=0.003, return_all: bool=False) -> Tensor:
-        """
-        Linear modification always happens in the embedding space, as there are
-        no guarantees at this point that the reconstruction is faithful. That
-        means that the modified batch is always returned in the embedding space.
-        """
-        flow = self.flow
-        assert isinstance(batch, Tensor) and batch.dim() == 2 and batch.shape[0] > 0, 'sample needs to be a non-empty 2D Tensor'
-        if self.space_in == Space.Data: # This here method only operates in E space!
-            batch = flow.X_to_E(input=batch)
-        clz_int = classes.squeeze().to(dtype=torch.int64, device=batch.device)
-        batch_shape = batch.shape
-        embedded = batch.clone().detach()
-
-        results_unacc: list[Tensor] = []
-        results: list[Tensor] = []
-        steps = 0
-        while steps < 20 and embedded.shape[0] > 0:
-            steps += 1
-            b_batch = flow.E_to_B(embeddings=embedded, classes=clz_int)[0]
-            u = 1e-5 + torch.rand_like(b_batch) * perc_change # ~(0, 0.3]% change/step
-            
-            q = torch.vstack(tensors=list(
-                self.normals[clz_int[idx].item()].cdf(b_batch[idx]) for idx in range(b_batch.shape[0])))
-            
-            if condition == 'lower_than':
-                # Check if the quantiles already reside at the extremes and skip those samples,
-                # as we cannot make them worse.
-                mask_exclude = torch.where((q.min(dim=1).values < 1e-7) | (q.max(dim=1).values > 1.-1e-7), True, False)
-                if torch.any(mask_exclude).item():
-                    results_unacc.append(embedded[mask_exclude])
-                    embedded = embedded[~mask_exclude]
-                    clz_int = clz_int[~mask_exclude]
-                    continue
-            
-            # The following lambda tells us about which side of the normal distr.
-            # we're on. One could also say that it indicates the sign of the gradient.
-            lamb = torch.where(q < 0.5, 1., -1.).to(dtype=q.dtype)
-            if condition == 'concentrate':
-                b_batch_unagg_likelihood, b_batch_unagg_log_det =\
-                    self.log_rel_lik_emb_unagg(embeddings=embedded, clz=clz_int)
-                b_batch_unagg_likelihood += b_batch_unagg_log_det
-                lamb *= torch.sign(input=(target_lik / b_batch.shape[1]) - b_batch_unagg_likelihood)
-            else:
-                lamb *= 1. if condition == 'greater_than' else -1.
-            
-            q_prime = q + lamb * u
-            # Modify b according to the condition and target.
-            b_prime = torch.vstack(tensors=list(
-                self.normals[clz_int[idx].item()].icdf(Linear._icdf_safe(
-                    q=q_prime[idx])) for idx in range(b_batch.shape[0])))
-            
-            # Now we inverse and forward the modified base and check the resulting likelihoods!
-            # TODO: Check if the following is double work!
-            embedded_prime, eld = self.flow.E_from_B(base=b_prime, classes=clz_int)
-            embedded_prime_liks = self.flow.log_rel_lik_E(embeddings=embedded_prime, classes=clz_int)
-
-            mask_accept: Tensor = None
-            if condition == 'concentrate':
-                # 'concentrate_dim_log_tol' is per dimension, so we got to sum this up.
-                mask_accept = torch.where(torch.abs(embedded_prime_liks - target_lik) < concentrate_dim_log_tol, True, False)
-            else:
-                mask_accept = torch.where(embedded_prime_liks < target_lik, True, False) if condition == 'lower_than' else torch.where(embedded_prime_liks > target_lik, True, False)
-            
-            done = embedded_prime[mask_accept]
-            if done.shape[0] > 0:
-                results.append(done)
-            clz_int = clz_int[~mask_accept]
-            embedded = embedded_prime[~mask_accept]
-        
-        n_results = lambda: sum(r.shape[0] for r in results)
-        if n_results() < batch_shape[0]:
-            if return_all:
-                results.append(embedded_prime) # Return even those that were not accepted
-            if n_results() == 0:
-                return torch.empty((0, batch_shape[1]))
-        return torch.vstack(tensors=results)
-
-
-
-
-    def _modify(self, sample: Tensor, sample_is_embedding: bool, classes: Tensor, target_lik: float, condition: Literal['concentrate', 'lower_than', 'greater_than'], concentrate_dim_log_tol: float=1.0, perc_change: float=0.003, return_all: bool=False) -> Tensor:
-        flow = self.flow
-        org_shape = sample.shape
-        assert isinstance(sample, Tensor) and sample.dim() == 2 and sample.shape[0] > 1, 'sample needs to be a 2D Tensor with two or more data points.'
-        if not sample_is_embedding:
-            assert flow.can_reconstruct, 'Can only modify samples if they can be reconstructed'
-        clz_int = classes.squeeze().to(dtype=torch.int64, device=sample.device)
-        
-        
-        normals = { clz: Normal(
-            loc=flow.mean_for_class(clazz=clz).repeat(flow.num_dims),
-            scale=torch.exp(flow.log_scale_for_class(clazz=clz).repeat(flow.num_dims))) for clz in range(flow.num_classes) }
-
-
-        def to_b(t: Tensor, clz: Tensor) -> tuple[Tensor, Tensor]:
-            if not sample_is_embedding:
-                t = flow.X_to_E(input=t)
-            b, ld = flow.E_to_B(embeddings=t, classes=clz)
-            return b, ld
-        
-        def from_b(b: Tensor, clz: Tensor) -> Tensor:
-            t = flow.E_from_B(base=b, classes=clz)[0]
-            if not sample_is_embedding:
-                t = flow.X_from_E(embeddings=t)
-            return t
-        
-        def lik(t: Tensor, clz: Tensor) -> Tensor:
-            return (flow.log_rel_lik_E(embeddings=t, classes=clz) if sample_is_embedding else flow.log_rel_lik(input=t, classes=clz))
-        
-        def lik_unagg(t: Tensor, clz: Tensor) -> tuple[Tensor, Tensor]:
-            if not sample_is_embedding:
-                t = flow.X_to_E(input=t)
-            b, b_log_det = flow.E_to_B(embeddings=t, classes=clz)
-
-            return torch.vstack(tensors=list(
-                normals[clz_int[idx].item()].log_prob(value=b[idx]) for idx in range(t.shape[0])
-            )), (b_log_det / b.shape[1]).unsqueeze(dim=0).T.repeat(1, b.shape[1])
-
-        
-        results_unacc: list[Tensor] = []
-        results: list[Tensor] = []
-        sample = sample.clone().detach() # We make a copy now and chip-off acceptable results! The shape[0] will decrease!
-        steps = 0
-        while steps < 20 and sample.shape[0] > 0:
-            steps += 1
-            b_batch = to_b(t=sample, clz=clz_int)[0]
-            u = 1e-5 + torch.rand_like(b_batch) * perc_change # ~(0, 0.3]% change/step
-
-            q = torch.vstack(tensors=list(
-                normals[clz_int[idx].item()].cdf(b_batch[idx]) for idx in range(b_batch.shape[0])))
-            if condition == 'lower_than':
-                # Check if the quantiles already reside at the extremes and skip those samples,
-                # as we cannot make them worse.
-                mask_exclude = torch.where((q.min(dim=1).values < 1e-7) | (q.max(dim=1).values > 1.-1e-7), True, False)
-                if torch.any(mask_exclude).item():
-                    results_unacc.append(sample[mask_exclude])
-                    sample = sample[~mask_exclude]
-                    clz_int = clz_int[~mask_exclude]
-                    continue
-            
-            # The following lambda tells us about which side of the normal distr.
-            # we're on. One could also say that it indicates the sign of the gradient.
-            lamb = torch.where(q < 0.5, 1., -1.).to(dtype=q.dtype)
-            if condition == 'concentrate':
-                b_batch_unagg_likelihood, b_batch_unagg_log_det = lik_unagg(t=sample, clz=clz_int)
-                b_batch_unagg_likelihood += b_batch_unagg_log_det
-                lamb *= torch.sign(input=(target_lik / b_batch.shape[1]) - b_batch_unagg_likelihood)
-            else:
-                lamb *= 1. if condition == 'greater_than' else -1.
-            
-            q_prime = q + lamb * u
-            # Modify b according to the condition and target.
-            b_prime = torch.vstack(tensors=list(
-                normals[clz_int[idx].item()].icdf(Linear._icdf_safe(
-                    q=q_prime[idx])) for idx in range(b_batch.shape[0])))
-            
-            # Now we inverse and forward the modified and check the resulting likelihoods!
-            samp_prime = from_b(b=b_prime, clz=clz_int)
-            samp_prime_liks = lik(t=samp_prime, clz=clz_int)
-
-            mask_accept: Tensor = None
-            if condition == 'concentrate':
-                # 'concentrate_dim_log_tol' is per dimension, so we got to sum this up.
-                mask_accept = torch.where(torch.abs(samp_prime_liks - target_lik) < concentrate_dim_log_tol, True, False)
-            else:
-                mask_accept = torch.where(samp_prime_liks < target_lik, True, False) if condition == 'lower_than' else torch.where(samp_prime_liks > target_lik, True, False)
-            
-            done = samp_prime[mask_accept]
-            if done.shape[0] > 0:
-                results.append(done)
-            clz_int = clz_int[~mask_accept]
-            sample = samp_prime[~mask_accept]
-        
-        n_results = lambda: sum(r.shape[0] for r in results)
-        if n_results() < org_shape[0]:
-            if return_all:
-                results.append(samp_prime) # Return even those that were not accepted
-            if n_results() == 0:
-                return torch.empty((0, org_shape[1]))
-        return torch.vstack(tensors=results)
-        
-
-
-    def modify(self, sample: Tensor, classes: Tensor, target_lik: float, condition: Literal['concentrate', 'lower_than', 'greater_than'], concentrate_dim_log_tol: float=1.0, perc_change: float=0.003, return_all: bool=False) -> Tensor:
-        return self._modify(sample=sample, sample_is_embedding=False, classes=classes, target_lik=target_lik, condition=condition, concentrate_dim_log_tol=concentrate_dim_log_tol, perc_change=perc_change, return_all=return_all)
-
-
-    def modify_emb(self, sample: Tensor, classes: Tensor, target_lik: float, condition: Literal['concentrate', 'lower_than', 'greater_than'], concentrate_dim_log_tol: float=1.0, perc_change: float=0.003, return_all: bool=False) -> Tensor:
-        return self._modify(sample=sample, sample_is_embedding=True, classes=classes, target_lik=target_lik, condition=condition, concentrate_dim_log_tol=concentrate_dim_log_tol, perc_change=perc_change, return_all=return_all)
