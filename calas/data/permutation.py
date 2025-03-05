@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from torch import Tensor
 from torch.func import jacrev
 from ..models.flow import CalasFlow
@@ -8,8 +9,8 @@ from torch.distributions.uniform import Uniform
 from types import TracebackType
 from typing import Generic, TypeVar, Self, Optional, Literal, override, final, Callable
 from abc import ABC, abstractmethod
-import numpy as np
 from enum import Enum, StrEnum
+from warnings import warn
 
 
 T = TypeVar(name='T', bound=CalasFlow)
@@ -562,8 +563,10 @@ class CurseOfDimDataPermute(PermuteData[T]):
         return self.space
     
     def permute(self, batch: Tensor, classes: Tensor, likelihood: Optional[Likelihood]=None) -> Tensor:
-        if not likelihood is None:
-            raise Exception('The argument `likelihood` is not supported here.')
+        """
+        NOTE: The argument `likelihood` is not supported here and ignored.
+        """
+        
         assert batch.dim() == 2 and batch.shape[0] > 1, 'A 2D tensor with two or more samples is required.'
 
         mean, std, norm = batch.mean(dim=0), batch.std(dim=0), torch.atleast_2d(batch.norm(dim=1, p=1)).T
@@ -618,4 +621,60 @@ class CurseOfDimDataPermute(PermuteData[T]):
             cod.div_(cod_norm).mul_(norm)
         
         return cod
+
+
+class PermuteDims(PermuteData[T]):
+    """
+    Permutes samples by randomly swapping their dimensions. Can work in any
+    space. It is not possible the indicate a desired likelihood, either.
+    """
+
+    def __init__(self, flow: T, space: Space, num_dims: tuple[int, int]=(2,4), change_prob: float=0.1, seed: Optional[int]=0):
+        super().__init__(flow=flow, seed=seed)
+        if space == Space.Embedded or space == Space.Base:
+            warn('Permuting dimensions in the Embedding (E) or Base (B) space will not change the likelihood of samples under a normalizing flow!')
+        assert isinstance(num_dims, tuple) and num_dims[0] <= num_dims[1] and (num_dims[0] % 2) == 0 and (num_dims[1] % 2) == 0
+        self.space = space
+        self.num_dims = num_dims
+        self.change_prob = change_prob
     
+    @property
+    @override
+    def space_in(self) -> Space:
+        return self.space
+    
+    @property
+    @override
+    def space_out(self) -> Space:
+        return self.space
+    
+    def permute(self, batch: Tensor, classes: Optional[Tensor]=None, likelihood: Optional[Likelihood]=None) -> Tensor:
+        """
+        NOTE: The arguments `classes` and `likelihood` are completely ignored.
+        """
+        a, b = self.num_dims
+        assert a >= 0 and b <= batch.shape[1]
+        use_num_dims: int = 0
+        if a == b:
+            use_num_dims = a
+        else:
+            temp = np.array(list(range(a, b+1, 2)))
+            use_num_dims = self.gen.choice(a=temp, size=1).item()
+        
+        if use_num_dims == 0 or self.change_prob < 1e-15:
+            return batch
+        if self.change_prob > 0:
+            if not self.gen.choice(a=[True, False], p=[self.change_prob, 1.0 - self.change_prob], size=1, replace=False).item():
+                return batch # we chose not to change
+        
+        perm = self.gen.permutation(batch.shape[1])[0:(use_num_dims)].tolist()
+        new_idx = list(range(batch.shape[1]))
+
+        for i in range(0, use_num_dims, 2):
+            p1 = perm[i]
+            p2 = perm[i+1]
+            t = p1
+            new_idx[p1] = p2
+            new_idx[p2] = t
+        
+        return batch[:, new_idx]
