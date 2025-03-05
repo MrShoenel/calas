@@ -35,7 +35,7 @@ def test_calas():
     assert torch.allclose(input=use_X, other=x)
 
 
-    samp, _, _ = flow.sample_emb(5)
+    samp, _, _ = flow.sample_E(5)
     assert samp.shape == (5,2)
 
     loss = flow.loss(input=x, classes=use_C)
@@ -54,7 +54,7 @@ def test_calas_repr():
     embeddings = flow.repr.embed(x=samp)
     assert embeddings.shape == (100, repr.embed_dim)
     
-    samp2 = flow.sample_emb(n_samp=50)[0]
+    samp2 = flow.sample_E(n_samp=50)[0]
     assert samp2.shape == (50, sum((32,16,32)))
     samp3 = flow.sample(n_samp=10)[0]
     assert samp3.shape == (10, 2)
