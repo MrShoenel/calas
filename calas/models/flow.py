@@ -8,7 +8,7 @@ from normflows.distributions.base import ConditionalDiagGaussian
 from normflows.flows import Flow
 from typing import Optional, Union, override, Literal, final, Iterator
 from .repr import Representation, ReconstructableRepresentation
-from .func import normal_ppf_safe
+from ..tools.func import normal_ppf_safe
 
 
 
