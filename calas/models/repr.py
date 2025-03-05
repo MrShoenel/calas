@@ -1,7 +1,7 @@
 import torch
 from torch import nn, Tensor
 from abc import ABC, abstractmethod
-from typing import override
+from typing import override, Sequence
 
 
 class Representation(nn.Module, ABC):
@@ -100,3 +100,50 @@ class Identity(ReconstructableRepresentation):
     @override
     def embed(self, x: Tensor) -> Tensor:
         return x
+
+
+
+class AE_UNet_Repr(ReconstructableRepresentation):
+    def __init__(self, input_dim, hidden_sizes: int|Sequence[int], *args, **kwargs):
+        super().__init__(input_dim, *args, **kwargs)
+
+        if isinstance(hidden_sizes, int):
+            hidden_sizes = (hidden_sizes,)
+
+        self.hidden_sizes = hidden_sizes
+
+        self.hidden_modules: list[nn.Sequential] = []
+        for idx in range(len(hidden_sizes)):
+            num_in = input_dim if idx == 0 else hidden_sizes[idx-1]
+            num_out = hidden_sizes[idx]
+
+            mods: list[nn.Module] = []
+            if idx > 0:
+                mods.append(nn.Dropout1d(p=0.2))
+            mods.append(nn.Linear(in_features=num_in, out_features=num_out, bias=True))
+            mods.append(nn.SiLU())
+            self.hidden_modules.append(nn.Sequential(*mods))
+            # Register modules on self, so nn.Module can properly handle them!
+            setattr(self, f'block_{idx}', self.hidden_modules[-1])
+
+        self._decoder = nn.Linear(in_features=sum(self.hidden_sizes), out_features=self.input_dim, bias=True)
+    
+
+    @property
+    @override
+    def embed_dim(self) -> int:
+        return sum(self.hidden_sizes)
+    
+    @property
+    @override
+    def decoder(self) -> nn.Module:
+        return self._decoder
+    
+    @override
+    def embed(self, x: Tensor) -> Tensor:
+        reprs: list[Tensor] = []
+        prev: Tensor = x
+        for seq in self.hidden_modules:
+            reprs.append(seq(prev))
+            prev = reprs[-1]
+        return torch.hstack(reprs)

@@ -3,7 +3,8 @@ import pytest
 from torch import device, cuda, Tensor
 from calas.models.flow import CalasFlowWithRepr
 from ..tools.two_moons import two_moons_rejection_sampling
-from ..models.flow_test import AE_UNet_Repr, make_flows
+from ..models.flow_test import make_flows
+from ..models.repr import AE_UNet_Repr
 from ..tools.func import normal_cdf, normal_ppf_safe
 from .permutation import Space, Likelihood, LocsScales, Data2Data_Grad, Normal2Normal_Grad, Normal2Normal_NoGrad, CurseOfDimDataPermute
 from pytest import mark
