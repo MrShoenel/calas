@@ -5,7 +5,7 @@ from torch.func import jacrev
 from torch.nn import functional as F
 from torch.distributions.normal import Normal
 from .flow import CalasFlow
-from .func import normal_cdf, normal_ppf_safe
+from .func import normal_cdf, normal_ppf_safe, normal_log_pdf
 from types import TracebackType
 from typing import Generic, TypeVar, Self, Optional, Literal, override, final, Callable
 from abc import ABC, abstractmethod
@@ -469,98 +469,44 @@ class Dist2Dist(Permute[T], ABC):
             self.locs_scales_flow_frac * flow_stds + (1.0 - self.locs_scales_flow_frac) * batch_stds
 
 
-
-class Normal2Normal(Dist2Dist[T]):
-    """
-    Takes the data in B-space and assumes it is normal. Calculates the data's
-    mean and std and then uses this transform the data to quantiles and then
-    to real data again using another normal distribution that is more or less
-    likely than the flow's base distribution.
-
-    Note: This is a "sample-wise" permutation. Each sample is transposed in B
-    and then modified.
-    """
-
-    def __init__(self, flow: T, seed: Optional[int]=0):
-        super().__init__(flow=flow, seed=seed)
-        
-        self.normals = { clz: Normal(
-            loc=self.flow.mean_for_class(clazz=clz).repeat(self.flow.num_dims),
-            scale=torch.exp(self.flow.log_scale_for_class(clazz=clz).repeat(self.flow.num_dims))) for clz in range(flow.num_classes) }
-    
-    
-    @override
-    def permute(self, embeddings: Tensor, classes: Tensor, likelihood: Literal['increase', 'decrease', 'random']) -> Tensor:
-        clz_int = torch.atleast_1d(classes.squeeze().to(torch.int64))
-        b = self.flow.E_to_B(embeddings=embeddings, classes=classes)[0]
-        
-        flow_means = torch.vstack(tensors=list(
-            self.normals[clz_int[idx].item()].loc for idx in range(b.shape[0])))
-        
-        b_means = b.mean(dim=1).unsqueeze(-1).repeat(1, self.flow.num_dims)
-        b_stds = b.std(dim=1).unsqueeze(-1).repeat(1, self.flow.num_dims)
-
-        # If we want to increase the likelihood, the current means of the data
-        # in b need to approach the flow's means. The scale needs to decrease
-        # for the data to become more likely.
-
-        means_diff = flow_means - b_means
-        # The sign tells us towards which way the means get closer
-        means_sign = torch.sign(means_diff)
-
-        if likelihood == 'decrease':
-            means_sign *= -1.
-        elif likelihood == 'random':
-            r = torch.tensor(self.gen.random(size=means_sign.shape), device=means_sign.device)
-            means_sign = torch.where(r < 0.5, -1., 1.)
-
-        # Let's take a small step towards or away from the mean:
-        altered_means = b_means + means_sign * b_stds[:, 0:1] * .1
-
-        stds_mult = torch.full_like(b_stds, fill_value=0.9 if likelihood == 'increase' else 1.1)
-        if likelihood == 'random':
-            r = torch.tensor(self.gen.random(size=stds_mult.shape), device=stds_mult.device)
-            stds_mult = torch.where(r < 0.5, 0.9, 1.1)
-        
-        altered_stds = b_stds * stds_mult
-
-        q = torch.vmap(normal_cdf)(b, b_means, b_stds)
-        b_prime = torch.vmap(normal_ppf_safe)(q, altered_means, altered_stds)
-
-        return self.flow.E_from_B(base=b_prime, classes=clz_int)
-
-
-
 class Data2Data_Grad(PermuteData[T]):
     """
     A same-space permutation that updates the input using the gradient with
     regard to the appropriate loss function.
     """
     def __init__(self, flow: T, space: Space, u_min: float=0.01, u_max: float=0.01, scale_grad: bool=True, seed: Optional[int]=0):
-        super().__init__(flow=flow, seed=seed)
+        super().__init__(flow=flow, seed=seed, u_min=u_min, u_max=u_max)
         if space == Space.Quantiles:
-            raise Exception(f'Space {space} is not supported.')
-        self.space = space
-        self.u_min = u_min
-        self.u_max = u_max
+            raise Exception(f'The Quantiles-space is not supported. Modifying data through their quantiles requires the assumption of a (normal) distribution. That means you are effectively doing a normal-2-normal (distributional) permutation using gradient information. That is already covered in classes `Normal2Normal_Grad` (using one of the methods `loc_scale`, `quantiles`, or `hybrid`) and `Normal2Normal_NoGrad` (using method `quantiles`).')
+        
         self.scale_grad = scale_grad
+        self.space = space
+    
     
     @override
     @property
     def space_in(self):
         return self.space
     
+
     @property
     @override
     def space_out(self):
         return self.space
     
+
     @override
     def permute(self, batch: Tensor, classes: Tensor, likelihood: Likelihood) -> Tensor:
+        """
+        Modifies a sample by taking the derivative with respect to it. This is a
+        distribution-free attempt.
+        """
+
         if likelihood == Likelihood.Randomize:
             raise Exception('This permutation explicitly leverages gradient information. If you require a random permutation, try another class.')
         
         clz_int = torch.atleast_1d(classes.squeeze().to(torch.int64))
+
         # 'batch' could be in any of these 3 spaces.
         loss_fn_grad = self.flow.loss_wrt_X_grad if self.space == Space.Data else (self.flow.loss_wrt_E_grad if self.space == Space.Embedded else self.flow.loss_wrt_B_grad)
 
@@ -579,48 +525,6 @@ class Data2Data_Grad(PermuteData[T]):
         return batch_prime
 
 
-
-
-
-class LinearPerm_in_B(Dist2Dist[T]):
-    def __init__(self, flow: T, u_min: float=0.001, u_max: float=0.05, seed: Optional[int]=0):
-        super().__init__(flow=flow, seed=seed)
-        self.u_min = u_min
-        self.u_max = u_max
-    
-
-    def permute(self, embeddings: Tensor, classes: Tensor, likelihood: Literal['increase', 'decrease', 'random']) -> Tensor:
-        clz_int = torch.atleast_1d(classes.squeeze().to(torch.int64))
-        b = self.flow.E_to_B(embeddings=embeddings, classes=classes)[0]
-
-        
-        flow_means = torch.vstack(tensors=list(
-            self.flow.mean_for_class(clazz=clz_int[idx].item()) for idx in range(b.shape[0]))).repeat(1, self.flow.num_dims)
-        flow_stds = torch.exp(torch.vstack(tensors=list(
-            self.flow.log_scale_for_class(clazz=clz_int[idx].item()) for idx in range(b.shape[0]))).repeat(1, self.flow.num_dims))
-
-        # For this synthesis method, it appears that using individual means and
-        # stds works better than taking the whole batch into account.
-        b_means = b.mean(dim=1).unsqueeze(-1).repeat(1, self.flow.num_dims)
-        b_stds = b.std(dim=1).unsqueeze(-1).repeat(1, self.flow.num_dims)
-        # b_means = b.mean().repeat(*b.shape)
-        # b_stds = b.std().repeat(*b.shape)
-
-        use_means = 0.2 * flow_means + 0.8 * b_means
-        use_stds = 0.2 * flow_stds + 0.8 * b_stds
-
-        u = self.u_min + torch.tensor(data=self.gen.random(size=b.shape), device=b.device, dtype=b.dtype) * (self.u_max - self.u_min)
-        q: Tensor = torch.vmap(normal_cdf)(b, use_means, use_stds)
-        lamb = torch.where(q < 0.5, 1., -1.).to(dtype=q.dtype)
-        if likelihood == 'decrease':
-            lamb *= -1
-        q_prime = q + lamb * u
-
-        b_prime = torch.vmap(normal_ppf_safe)(q_prime, use_means, use_stds)
-        return self.flow.E_from_B(base=b_prime, classes=clz_int)
-
-
-
 class Normal2Normal_Grad(Dist2Dist[T]):
     """
     Changes the distribution of one or more samples using one of three methods. In
@@ -632,7 +536,8 @@ class Normal2Normal_Grad(Dist2Dist[T]):
     NOTE: This permutation leverages gradient information to determine how the
     parameters under the chosen method should be altered. This makes this method
     inherently more computationally expensive. Therefore, consider also
-    :code:`Normal2Normal_Linear`.
+    :code:`Normal2Normal_NoGrad`, which might give results as good (and sometimes
+    better) compared to this class.
 
     The first method, 'loc_scale', alters the sample's location and scale, while
     the quantiles stay the same. Simply put, it is like serializing the sample
@@ -767,9 +672,36 @@ class Normal2Normal_Grad(Dist2Dist[T]):
 
 
 class Normal2Normal_NoGrad(Dist2Dist[T]):
-    def __init__(self, flow: T, method: Literal['loc_scale', 'quantiles', 'hybrid']=None, u_min: float=0.001, u_max: float=0.001, u_frac_negative: float=0.0, locs_scales_mode: LocsScales=LocsScales.Individual, locs_scales_flow_frac: float=0.2, stds_step_perc: float=0.025, seed: Optional[int]=0):
+    """
+    Performs distributional modifications similar to :code:`Normal2Normal_Grad`, but without
+    using gradient information of the underlying entire model (e.g., the entire flow and its
+    representation). It can, however, use very light gradient information of the base distribution,
+    which is computationally inexpensive.
+
+    This class operates in base space (B) exclusively and modifies samples there. Samples are
+    modified using one of two (three) methods:
+
+    The first method, `loc_scale`, modifies a sample under its assumed normal distribution by first
+    computing its averaged means and stds and then modifying those to increase or decrease the
+    likelihood of the sample under a normal distribution with these parameters.
+    This method has an extra flag, `use_loc_scale_base_grad`. If `False`, means and scales are
+    altered step-wise. The means are increased or decreased using a fraction of the standard
+    deviation in each call. The scales are multiplied with a constant factor, which is given to the
+    constructor: `stds_step_perc`.
+    When `use_loc_scale_base_grad=True`, then we take the gradient of the sample under the assumed
+    normal distribution w.r.t. the given means and scales. Then, the means and scales are altered
+    using that information. Even though we use the gradient here, this method is not considered to
+    be expensive, because it is just the gradient of the normal distribution's PDF, not the entire
+    flow and its representation.
+    """
+    def __init__(self, flow: T, method: Literal['loc_scale', 'quantiles'], use_loc_scale_base_grad: bool=False, u_min: float=0.001, u_max: float=0.001, u_frac_negative: float=0.0, locs_scales_mode: LocsScales=LocsScales.Individual, locs_scales_flow_frac: float=0.2, stds_step_perc: float=0.025, seed: Optional[int]=0):
         super().__init__(flow=flow, seed=seed, u_min=u_min, u_max=u_max, u_frac_negative=u_frac_negative, locs_scales_mode=locs_scales_mode, locs_scales_flow_frac=locs_scales_flow_frac)
         self.stds_step_perc = stds_step_perc
+        self.method = method
+        self.use_loc_scale_base_grad = use_loc_scale_base_grad
+
+        if self.use_loc_scale_base_grad:
+            self.lik_fn_grad = jacrev(func=lambda x, loc, scale: normal_log_pdf(x=x, loc=loc, scale=scale).sum(dim=1).mean(), argnums=(1,2))
     
 
     @property
@@ -777,16 +709,73 @@ class Normal2Normal_NoGrad(Dist2Dist[T]):
     def space_in(self) -> Space:
         return Space.Base
     
+
     @property
     @override
     def space_out(self) -> Space:
         return Space.Base
     
-    def permute(self, batch: Tensor, classes: Tensor, likelihood: Likelihood):
+
+    def permute_loc_scale_step(self, use_means: Tensor, use_stds: Tensor, means_sign: Tensor, u: Tensor, likelihood: Likelihood) -> Tensor:
+        # Let's take a small step that also incorporates the standard deviation
+        # as found in the sample.
+        means_prime = use_means + means_sign * use_stds[:, 0:1] * u
+        
+        # If we want to increase the likelihood, the SD should shrink.
+        stds_mult: float
+        if likelihood == Likelihood.Increase:
+            stds_mult = 1.0 - self.stds_step_perc # for 5%/0.05, this'll be 0.95
+        else:
+            stds_mult = 1.0 + self.stds_step_perc # for 5%/0.05, this'll be 1.05
+        
+        stds_prime = use_stds * stds_mult
+
+        return means_prime, stds_prime
+    
+
+    def permute_loc_scale_base_grad(self, batch: Tensor, use_means: Tensor, use_stds: Tensor, likelihood: Likelihood, u: Tensor) -> Tensor:
+        means_grad, stds_grad = self.lik_fn_grad(batch, use_means, use_stds)
+        means_grad_sign, stds_grad_sign = torch.sign(input=means_grad), torch.sign(input=stds_grad)
+        means_grad, stds_grad = torch.abs(means_grad), torch.abs(stds_grad)
+
+        if likelihood == Likelihood.Increase:
+            means_grad_sign *= -1.
+            stds_grad_sign *= -1.
+        
+        means_grad_weight = means_grad.reciprocal() / means_grad.reciprocal().max()
+        means_prime = use_means + means_grad_sign * means_grad_weight * u
+
+        stds_grad_weight = stds_grad.reciprocal() / stds_grad.reciprocal().max()
+        stds_prime = use_stds + stds_grad_sign * stds_grad_weight * u
+
+        return means_prime, stds_prime
+    
+
+    def permute_quantiles(self, q: Tensor, u: Tensor, use_means: Tensor, use_stds: Tensor, likelihood: Likelihood) -> Tensor:
         """
-        Approximate implementation of old  method of class in line 461
+        This is the first, originally proposed method. It *linearly* (depending on `u`) modifies the
+        sample by altering its quantiles under the currently assumed normal distribution. Usually,
+        `u` is drawn uniformly (hence the name), which means that the modified sample will approximately
+        follow the same distribution(-family; here: normal).
+        """
+        lamb = torch.where(q < 0.5, 1., -1.).to(dtype=q.dtype)
+        if likelihood == Likelihood.Decrease:
+            lamb *= -1.
+        
+        q_prime = q + lamb * u
+        b_prime = torch.vmap(normal_ppf_safe)(q_prime, use_means, use_stds)
+        return b_prime
+
+
+    def permute(self, batch: Tensor, classes: Tensor, likelihood: Likelihood) -> Tensor:
+        """
+        Approximate implementation of old  method of class in line 461.
+
+        NOTE: We don't actually verify that `batch` is in the correct space
+        except for testing its dimensionality.
         """
         clz_int = torch.atleast_1d(classes.squeeze().to(torch.int64))
+        assert batch.shape[1] == self.flow.num_dims
 
         use_means, use_stds = self.averaged_locs_and_scales(batch=batch, classes=clz_int)
         flow_means = self.flow_locs(classes=classes)
@@ -802,28 +791,26 @@ class Normal2Normal_NoGrad(Dist2Dist[T]):
 
         if likelihood == Likelihood.Decrease:
             means_sign *= -1.
-        del batch_means
         
         # Here in this method, if we wanted to randomize the resulting likelihoods,
         # we would control it by setting up `u` to be exactly 1.0 with a frac of 0.5.
         # We could also choose 
         u = self.u_like(means_sign)
-
-        # Let's take a small step that also incorporates the standard deviation
-        # as found in the sample.
-        means_prime = use_means + means_sign * use_stds[:, 0:1] * u
-        
-        # If we want to increase the likelihood, the SD should shrink.
-        stds_mult: float
-        if likelihood == Likelihood.Increase:
-            stds_mult = 1.0 - self.stds_step_perc # for 5%/0.05, this'll be 0.95
-        else:
-            stds_mult = 1.0 + self.stds_step_perc # for 5%/0.05, this'll be 1.05
-        
-        stds_prime = use_stds * stds_mult
-        use_means, use_stds = self.averaged_locs_and_scales(batch=batch, classes=clz_int)
-
         q = torch.vmap(normal_cdf)(batch, use_means, use_stds)
-        batch_prime = torch.vmap(normal_ppf_safe)(q, means_prime, stds_prime)
 
+        batch_prime: Tensor = None
+        if self.method == 'quantiles':
+            batch_prime = self.permute_quantiles(q=q, u=u, use_means=use_means, use_stds=use_stds, likelihood=likelihood)
+        else:
+            means_prime: Tensor = None
+            stds_prime: Tensor = None
+        
+            # else (not quantiles):
+            if self.use_loc_scale_base_grad:
+                means_prime, stds_prime = self.permute_loc_scale_base_grad(batch=batch, use_means=use_means, use_stds=use_stds, likelihood=likelihood, u=u)
+            else:
+                means_prime, stds_prime = self.permute_loc_scale_step(use_means=use_means, use_stds=use_stds, means_sign=means_sign, u=u, likelihood=likelihood)
+            
+            batch_prime = torch.vmap(normal_ppf_safe)(q, means_prime, stds_prime)
+        
         return batch_prime
