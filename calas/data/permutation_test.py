@@ -1,10 +1,13 @@
 import torch
-from torch import device, cuda
+import pytest
+from torch import device, cuda, Tensor
 from calas.models.flow import CalasFlowWithRepr
-from calas.tools.two_moons import two_moons_rejection_sampling
-from calas.models.flow_test import AE_UNet_Repr, make_flows
-from .permutation import Space, Likelihood, Data2Data_Grad, Normal2Normal_Grad, Normal2Normal_NoGrad
+from ..tools.two_moons import two_moons_rejection_sampling
+from ..models.flow_test import AE_UNet_Repr, make_flows
+from ..tools.func import normal_cdf, normal_ppf_safe
+from .permutation import Space, Likelihood, LocsScales, Data2Data_Grad, Normal2Normal_Grad, Normal2Normal_NoGrad, CurseOfDimDataPermute
 from pytest import mark
+from typing import Callable
 
 
 
@@ -104,3 +107,52 @@ def test_N2N_no_Grad_quantiles(lik: Likelihood):
     num_corr = (flow.log_rel_lik_B(samp_b, samp_class) < flow.log_rel_lik_B(perm_b, samp_class)).sum() if lik == Likelihood.Increase else (flow.log_rel_lik_B(samp_b, samp_class) > flow.log_rel_lik_B(perm_b, samp_class)).sum()
 
     assert num_corr == samp.shape[0]
+
+
+@mark.parametrize('use_grad_dir', [True, False])
+@mark.parametrize('space', [Space.Data, Space.Embedded, Space.Base, Space.Quantiles])
+def test_CurseOfDimDataPermute(use_grad_dir: bool, space: Space):
+    torch.manual_seed(0)
+    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
+    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
+    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
+    samp_class = torch.full((100,), 0.).to(device=dev)
+
+    if space == Space.Quantiles and use_grad_dir:
+        with pytest.raises(Exception):
+            CurseOfDimDataPermute(flow=flow, space=space, use_grad_dir=use_grad_dir)
+        return
+    
+    
+    lik_fn: Callable[[Tensor, Tensor], Tensor] = flow.log_rel_lik_X
+    if space == Space.Embedded:
+        lik_fn = flow.log_rel_lik_E
+        samp = flow.X_to_E(input=samp)
+    elif space == Space.Base:
+        lik_fn = flow.log_rel_lik_B
+        samp = flow.X_to_B(input=samp, classes=samp_class)[0]
+    elif space == Space.Quantiles:
+        temp = Normal2Normal_NoGrad(flow=flow, method='quantiles', locs_scales_flow_frac=0.0, locs_scales_mode=LocsScales.Averaged)
+        samp = flow.X_to_B(input=samp, classes=samp_class)[0]
+        means, stds = temp.averaged_locs_and_scales(batch=samp, classes=samp_class)
+        samp = torch.vmap(normal_cdf)(samp, means, stds)
+        lik_fn = lambda q, clz: flow.log_rel_lik_B(base=torch.vmap(normal_ppf_safe)(q, means, stds), classes=clz)
+
+    num_dims = (1,2) if space == Space.Data else (4,8)
+    codp = CurseOfDimDataPermute(flow=flow, space=space, use_grad_dir=use_grad_dir, num_dims=num_dims)
+    perm = codp.permute(batch=samp, classes=samp_class)
+    assert samp.shape == perm.shape
+
+    before, after = lik_fn(samp, samp_class), lik_fn(perm, samp_class)
+    num_worse = torch.where(after < before, 1., 0).sum().item()
+
+    if space == Space.Quantiles:
+        # Usually, in quantile space, the samples become better. This makes sense,
+        # because the manipulated quantiles tend to go towards the mean on average,
+        # where the resulting likelihood is higher.
+        assert (num_worse / samp.shape[0]) < 0.66
+    elif space == Space.Data:
+        # There are only 2 dimensions here..
+        assert (num_worse / samp.shape[0]) > 0.51
+    else:
+        assert (num_worse / samp.shape[0]) > 0.70

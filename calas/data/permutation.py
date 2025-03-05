@@ -3,6 +3,8 @@ from torch import Tensor
 from torch.func import jacrev
 from ..models.flow import CalasFlow
 from ..tools.func import normal_cdf, normal_ppf_safe, normal_log_pdf
+from torch.distributions.normal import Normal
+from torch.distributions.uniform import Uniform
 from types import TracebackType
 from typing import Generic, TypeVar, Self, Optional, Literal, override, final, Callable
 from abc import ABC, abstractmethod
@@ -520,3 +522,100 @@ class Normal2Normal_NoGrad(Dist2Dist[T]):
             batch_prime = torch.vmap(normal_ppf_safe)(q, means_prime, stds_prime)
         
         return batch_prime
+
+
+class CurseOfDimDataPermute(PermuteData[T]):
+    """
+    Permutations applied directly to the data that exploit the curse of
+    dimensionality in order to systematically and gradully destroy their
+    structure.
+
+    NOTE: This is a batch-2-batch permutation, that is, two or more samples are
+    required as input in order to compute some meaningful permutations.
+    NOTE: This permutation works with arbitrary spaces, as long as you do not
+    use the gradient direction. For some arbitrary space, set this to `False`
+    and specify an arbitrary :code:`Space`.
+    """
+    def __init__(self, flow: T, space: Space, distr: Literal['Normal', 'Uniform']|None=None, num_dims: tuple[int,int]=(0,1), mode: Literal['replace', 'add']|None=None, use_grad_dir: bool|None=None, normalize: bool|None=True, scale_grad: bool=True, u_min: float=0.01, u_max: float=0.01, u_frac_negative: float=0.0, seed: Optional[int]=0):
+        super().__init__(flow=flow, seed=seed, u_min=u_min, u_max=u_max, u_frac_negative=u_frac_negative)
+        
+        if space == Space.Quantiles and use_grad_dir:
+            raise Exception('Taking the loss w.r.t. quantiles requires the assumption of a distribution, which we do not have here. Choose another space or disable `use_grad_dir`.')
+
+        self.space = space
+        self.distr = distr
+        self.num_dims = num_dims
+        self.mode = mode
+        self.use_grad_dir = use_grad_dir
+        self.normalize = normalize
+        self.scale_grad = scale_grad
+    
+
+    @property
+    @override
+    def space_in(self) -> Space:
+        return self.space
+    
+    @property
+    @override
+    def space_out(self) -> Space:
+        return self.space
+    
+    def permute(self, batch: Tensor, classes: Tensor, likelihood: Optional[Likelihood]=None) -> Tensor:
+        if not likelihood is None:
+            raise Exception('The argument `likelihood` is not supported here.')
+        assert batch.dim() == 2 and batch.shape[0] > 1, 'A 2D tensor with two or more samples is required.'
+
+        mean, std, norm = batch.mean(dim=0), batch.std(dim=0), torch.atleast_2d(batch.norm(dim=1, p=1)).T
+
+        distr = self.distr
+        if distr is None:
+            distr = ['Normal', 'Uniform'][self.gen.integers(low=0, high=2, size=(1,)).item()]
+        
+        dist = Normal(loc=mean, scale=std, validate_args=True) if distr == 'Normal' else Uniform(low=batch.min(dim=0).values, high=batch.max(dim=0).values)
+        cod = dist.sample((batch.shape[0],))
+
+        use_grad_dir = self.use_grad_dir
+        if use_grad_dir is None:
+            use_grad_dir = [True, False][self.gen.integers(low=0, high=2, size=(1,)).item()]
+        if use_grad_dir:
+            grad_fn = self.flow.loss_wrt_X_grad if self.space == Space.Data else (self.flow.loss_wrt_E_grad if self.space == Space.Embedded else self.flow.loss_wrt_B_grad)
+            
+            grad = grad_fn(batch, classes)
+            grad_sign = torch.sign(grad)
+            grad = torch.abs(grad)
+            grad_weight = grad.reciprocal() / grad.reciprocal().max() if self.scale_grad else 1.
+            
+            u = self.u_like(cod)
+            cod = cod + grad_sign * grad_weight * u
+        
+        num_dims = self.num_dims
+        assert isinstance(num_dims, tuple)
+        a, b = num_dims
+        assert isinstance(a, int) and isinstance(b, int) and a > 0 and a <= b
+        use_num_dims = a if a == b else self.gen.integers(low=a, high=b+1, size=(1,)).item()
+        
+        
+        indices = torch.randperm(batch.shape[1])[0:use_num_dims]
+        temp = batch.clone()
+
+        mode = self.mode
+        if mode is None:
+            mode = ['replace', 'add'][self.gen.integers(low=0, high=2, size=(1,)).item()]
+
+        if mode == 'replace':
+            temp[:, indices] = cod[:, indices]
+            cod = temp
+        elif mode == 'add':
+            temp[:, indices] = 0.75 * temp[:, indices] + 0.25 * cod[:, indices]
+            cod = temp
+
+        normalize = self.normalize
+        if normalize is None:
+            normalize = [True, False][self.gen.integers(low=0, high=2, size=(1,)).item()]
+        if normalize:
+            cod_norm = torch.atleast_2d(cod.norm(dim=1, p=1)).T
+            cod.div_(cod_norm).mul_(norm)
+        
+        return cod
+    
