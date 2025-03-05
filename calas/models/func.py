@@ -37,7 +37,7 @@ def std_normal_ppf_safe(q: Tensor, tol: float=1e-7) -> Tensor:
 
 def normal_pdf(x: Tensor, loc: Tensor, scale: Tensor) -> Tensor:
     var = scale**2
-    return (1. / (scale * torch.sqrt(2*torch.pi))) * torch.exp(-(x-loc)**2 / (2*var))
+    return (1. / (scale * math.sqrt(2*torch.pi))) * torch.exp(-(x-loc)**2 / (2*var))
 
 
 def normal_pdf_grad(x: Tensor, loc: Tensor, scale: Tensor) -> Tensor:
