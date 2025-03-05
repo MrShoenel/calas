@@ -117,7 +117,7 @@ def test_calas_repr():
     classes_anomaly = torch.ones(samp_cod.shape[0], device=samp_cod.device)
     total_loss =\
         flow.loss(input=samp, classes=classes_nominal) +\
-        flow.loss_E(embeddings=samp_cod, classes=classes_anomaly) +\
+        flow.loss_wrt_E(embeddings=samp_cod, classes=classes_anomaly) +\
         repr.loss(x=samp)
     
     # The first loss is about the nominal samples under the nominal class. It also
@@ -138,8 +138,8 @@ def test_calas_repr():
     # batch, we are deliberately detaching it. Now the only loss that really has
     # an impact on the representation is its own loss (here: the 3rd).
     total_loss =\
-        flow.loss_E(embeddings=repr.forward(x=samp).detach(), classes=classes_nominal) +\
-        flow.loss_E(embeddings=samp_cod, classes=classes_anomaly) +\
+        flow.loss_wrt_E(embeddings=repr.forward(x=samp).detach(), classes=classes_nominal) +\
+        flow.loss_wrt_E(embeddings=samp_cod, classes=classes_anomaly) +\
         repr.loss(x=samp)
     
     

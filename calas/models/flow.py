@@ -8,6 +8,7 @@ from normflows.distributions.base import ConditionalDiagGaussian
 from normflows.flows import Flow
 from typing import Optional, Union, override, Literal, final, Iterator
 from .repr import Representation, ReconstructableRepresentation
+from .func import normal_ppf_safe
 
 
 
@@ -31,9 +32,9 @@ class CalasFlow(nn.Module):
         self.register_buffer(name='cond_means', tensor=torch.tensor(list(-1/2*extent + i*6. + 3. for i in range(self.num_classes))))
         self.register_buffer(name='cond_log_scales', tensor=torch.log(torch.tensor([0.5]*self.num_classes)))
 
-        self._loss_grad_wrt_X = jacrev(func=self.loss)
-        self._loss_grad_wrt_E = jacrev(func=self.loss_E)
-        self._loss_grad_wrt_B = jacrev(func=self.loss_B)
+        self._loss_grad_wrt_X = jacrev(func=self.loss_wrt_X)
+        self._loss_grad_wrt_E = jacrev(func=self.loss_wrt_E)
+        self._loss_wrt_B_grad = jacrev(func=self.loss_wrt_B)
 
         # TODO: Perhaps implement static translation according to conditional means
     
@@ -149,11 +150,21 @@ class CalasFlow(nn.Module):
 
     def log_rel_lik(self, input: Tensor, classes: Tensor) -> Tensor:
         emb = self.X_to_E(input=input)
-        return self.log_rel_lik_emb(embeddings=emb, classes=classes)
+        return self.log_rel_lik_E(embeddings=emb, classes=classes)
     
 
-    def log_rel_lik_emb(self, embeddings: Tensor, classes: Tensor) -> Tensor:
+    def log_rel_lik_X(self, input: Tensor, classes: Tensor) -> Tensor:
+        """Alias of log_rel_lik()."""
+        return self.log_rel_lik(input=input, classes=classes)
+    
+
+    def log_rel_lik_E(self, embeddings: Tensor, classes: Tensor) -> Tensor:
         return self.flow.log_prob(x=embeddings, context=self.ctx_endoder(classes=classes))
+    
+
+    def log_rel_lik_B(self, base: Tensor, classes: Tensor) -> Tensor:
+        emb = self.E_from_B(base=base, classes=classes)[0]
+        return self.log_rel_lik_E(embeddings=emb, classes=classes)
     
 
     def loss(self, input: Tensor, classes: Tensor) -> Tensor:
@@ -164,31 +175,85 @@ class CalasFlow(nn.Module):
         distribution.
         """
         emb = self.X_to_E(input=input)
-        return self.loss_E(embeddings=emb, classes=classes)
+        return self.loss_wrt_E(embeddings=emb, classes=classes)
     
 
-    def loss_X(self, input: Tensor, classes: Tensor) -> Tensor:
+    def loss_wrt_X(self, input: Tensor, classes: Tensor) -> Tensor:
         """Alias for loss()."""
         return self.loss(input=input, classes=classes)
     
 
-    def loss_E(self, embeddings: Tensor, classes: Tensor) -> Tensor:
+    def loss_wrt_E(self, embeddings: Tensor, classes: Tensor) -> Tensor:
         """
         Computes the forward KL divergence (we estimate the expectation using
         Monte Carlo). In other words, given samples in the representation/
         embeddings space (E), we calculate their average negative log likelihood
         under the base (B) distribution.
         """
-        return -torch.mean(input=self.log_rel_lik_emb(embeddings=embeddings, classes=classes))
+        return -torch.mean(input=self.log_rel_lik_E(embeddings=embeddings, classes=classes))
     
 
-    def loss_mu_sigma_B(self, base: Tensor, classes: Tensor) -> Tensor:
-        return self.los
-    
-
-    def loss_B(self, base: Tensor, classes: Tensor) -> Tensor:
+    def loss_wrt_B(self, base: Tensor, classes: Tensor) -> Tensor:
+        """
+        Inverse-transforms B -> E, then calls `loss_E()`.
+        """
         emb = self.E_from_B(base=base, classes=classes)[0]
-        return self.loss_E(embeddings=emb, classes=classes)
+        return self.loss_wrt_E(embeddings=emb, classes=classes)
+    
+
+    def loss_wrt_Q(self, q: Tensor, classes: Tensor, loc: Optional[Tensor]=None, scale: Optional[Tensor]=None) -> Tensor:
+        """
+        Computes the forward KL divergence of quantiles of some B. If location or
+        scale are missing, uses this flow's conditional base distribution's. Then,
+        the quantiles are used to "reconstitute" b from q, and a loss is calculated
+        by calling `loss_B()`.
+        """
+        clz_int: Tensor = None
+        if loc is None or scale is None:
+            assert isinstance(classes, Tensor)
+            clz_int = torch.atleast_1d(classes.squeeze().to(torch.int64))
+        
+        if loc is None:
+            loc = torch.vstack(tensors=list(
+                self.mean_for_class(clazz=clz_int[idx].item()) for idx in range(q.shape[0]))).repeat(1, self.num_dims)
+        if scale is None:
+            scale = torch.exp(torch.vstack(tensors=list(
+                self.log_scale_for_class(clazz=clz_int[idx].item()) for idx in range(b.shape[0]))).repeat(1, self.num_dims))
+        
+        b: Tensor = torch.vmap(normal_ppf_safe)(q, loc, scale)
+        return self.loss_wrt_B(base=b, classes=classes)
+    
+
+    def loss_wrt_X_grad(self, inputs: Tensor, classes: Tensor) -> Tensor:
+        """
+        The derivative of this flow's loss with regard to the inputs (here: original data space).
+        This function tells us how the inputs (*not* the flow's parameters) in the original data
+        space need to be changed in order to increase/decrease the resulting loss.
+        """
+        return self._loss_grad_wrt_X(inputs, classes)
+    
+
+    def loss_wrt_E_grad(self, embedded: Tensor, classes: Tensor) -> Tensor:
+        """
+        The derivative of this flow's loss with regard to the inputs (here: the embeddings).
+        This function tells us how the inputs (*not* the flow's parameters) in the embedding
+        space need to be changed in order to increase/decrease the resulting loss.
+        """
+        return self._loss_grad_wrt_E(embedded, classes)
+    
+
+    def loss_wrt_B_grad(self, base: Tensor, classes: Tensor) -> Tensor:
+        """
+        The derivative of this flow's loss with regard to base space (B). This function tells
+        use how the sample in B space (*not* the flow's parameters) need to be changed in order
+        to increase/decrease the resulting loss.
+        """
+        return self._loss_wrt_B_grad(base, classes)
+    
+
+    @final
+    def forward(self, *args, **kwargs) -> None:
+        raise Exception('Intent not clear, call, e.g., X_to_E, log_prob, loss, ..., etc.')
     
 
     def sample(self, n_samp: int, classes: Optional[Tensor]=None) -> tuple[Tensor, Tensor, Tensor]:
@@ -212,38 +277,6 @@ class CalasFlow(nn.Module):
             classes = torch.randint(low=0, high=self.num_classes, size=(n_samp,)).to(device=self.dev, dtype=torch.int64).squeeze()
         
         return *self.flow.sample(num_samples=n_samp, context=self.ctx_endoder(classes=classes)), classes
-    
-
-    @final
-    def forward(self, *args, **kwargs) -> None:
-        raise Exception('Intent not clear, call, e.g., X_to_E, log_prob, loss, ..., etc.')
-    
-
-    def loss_grad_wrt_X(self, inputs: Tensor, classes: Tensor) -> Tensor:
-        """
-        The derivative of this flow's loss with regard to the inputs (here: original data space).
-        This function tells us how the inputs (*not* the flow's parameters) in the original data
-        space need to be changed in order to increase/decrease the resulting loss.
-        """
-        return self._loss_grad_wrt_X(inputs, classes)
-    
-
-    def loss_grad_wrt_E(self, embedded: Tensor, classes: Tensor) -> Tensor:
-        """
-        The derivative of this flow's loss with regard to the inputs (here: the embeddings).
-        This function tells us how the inputs (*not* the flow's parameters) in the embedding
-        space need to be changed in order to increase/decrease the resulting loss.
-        """
-        return self._loss_grad_wrt_E(embedded, classes)
-    
-
-    def loss_grad_wrt_B(self, base: Tensor, classes: Tensor) -> Tensor:
-        """
-        The derivative of this flow's loss with regard to base space (B). This function tells
-        use how the sample in B space (*not* the flow's parameters) need to be changed in order
-        to increase/decrease the resulting loss.
-        """
-        return self._loss_grad_wrt_B(base, classes)
 
 
 
@@ -311,7 +344,7 @@ class CalasFlowWithRepr(CalasFlow):
             embedded.requires_grad = True
             was_training = self.training
             self.eval()
-            grad = self.loss_grad_wrt_E(embedded=embedded, classes=classes)
+            grad = self.loss_wrt_E_grad(embedded=embedded, classes=classes)
             if was_training:
                 self.train()
             cod = (torch.sign(grad) * torch.abs(cod)).detach()

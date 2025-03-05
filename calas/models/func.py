@@ -33,3 +33,12 @@ def normal_ppf_safe(q: Tensor, loc: Tensor, scale: Tensor, tol: float=1e-7) -> T
 
 def std_normal_ppf_safe(q: Tensor, tol: float=1e-7) -> Tensor:
     return normal_ppf_safe(q=q, tol=tol, loc=torch.zeros_like(input=q), scale=torch.ones_like(input=q))
+
+
+def normal_pdf(x: Tensor, loc: Tensor, scale: Tensor) -> Tensor:
+    var = scale**2
+    return (1. / (scale * torch.sqrt(2*torch.pi))) * torch.exp(-(x-loc)**2 / (2*var))
+
+
+def normal_pdf_grad(x: Tensor, loc: Tensor, scale: Tensor) -> Tensor:
+    return -(x - loc) / (scale**2) * normal_pdf(x=x, loc=loc, scale=scale)
