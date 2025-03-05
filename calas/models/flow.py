@@ -261,11 +261,11 @@ class CalasFlow(nn.Module):
         Calls `sample_e()` and transforms the sampled embeddings back to the
         original data space (X).
         """
-        samp_emb, log_liks, clazzes = self.sample_emb(n_samp=n_samp, classes=classes)
+        samp_emb, log_liks, clazzes = self.sample_E(n_samp=n_samp, classes=classes)
         return self.X_from_E(embeddings=samp_emb), log_liks, clazzes
     
 
-    def sample_emb(self, n_samp: int, classes: Optional[Tensor]=None) -> tuple[Tensor, Tensor, Tensor]:
+    def sample_E(self, n_samp: int, classes: Optional[Tensor]=None) -> tuple[Tensor, Tensor, Tensor]:
         """
         Samples from the flow using optional conditional classes. If no classes
         are given, generates random classes first.
@@ -317,65 +317,3 @@ class CalasFlowWithRepr(CalasFlow):
     def X_from_E(self, embeddings: Tensor) -> Tensor:
         assert self.can_reconstruct, 'Can only sample if the representation supports reconstruction.'
         return self.repr.reconstruct(embeddings=embeddings)
-
-
-    # def make_random_cod_anomaly(self) -> Tensor:
-    #     pass
-
-    # def make_random_cod_anomaly_emb(self) -> Tensor:
-    #     pass
-    
-    def make_CoD_batch_random_emb(self, nominal: Tensor, classes: Tensor, distr: Literal['Normal', 'Uniform']|None=None, num_dims: tuple[int,int]=(0,1), mode: Literal['replace', 'add']|None=None, use_grad_dir: bool|None=None, normalize: bool|None=True, verbose: bool=False) -> Tensor:
-        embedded = self.X_to_E(input=nominal).detach_()
-        # Note that the norm is for each sample!
-        mean, std, norm = embedded.mean(dim=0), embedded.std(dim=0), torch.atleast_2d(embedded.norm(dim=1, p=1)).T
-        
-        if distr is None:
-            distr = ['Normal', 'Uniform'][torch.randint(low=0, high=2, size=(1,)).item()]
-        if verbose:
-            print(f'distr={distr}')
-        
-        dist = Normal(loc=mean, scale=std, validate_args=True) if distr == 'Normal' else Uniform(low=embedded.min(dim=0).values, high=embedded.max(dim=0).values)
-        cod = dist.sample((nominal.shape[0],))
-
-        if use_grad_dir is None:
-            use_grad_dir = [True, False][torch.randint(low=0, high=2, size=(1,)).item()]
-        if use_grad_dir:
-            embedded.requires_grad = True
-            was_training = self.training
-            self.eval()
-            grad = self.loss_wrt_E_grad(embedded=embedded, classes=classes)
-            if was_training:
-                self.train()
-            cod = (torch.sign(grad) * torch.abs(cod)).detach()
-
-        if mode is None:
-            mode = ['replace', 'add'][torch.randint(low=0, high=2, size=(1,)).item()]
-        if verbose:
-            print(f'mode={mode}')
-        
-        assert isinstance(num_dims, tuple)
-        a, b = num_dims
-        assert isinstance(a, int) and isinstance(b, int) and a <= b
-        use_num_dims = a if a == b else torch.randint(low=a, high=b+1, size=(1,)).item()
-        
-        if verbose:
-            print(f'use_num_dims={use_num_dims}')
-        
-        
-        indices = torch.randperm(embedded.shape[1])[0:use_num_dims]
-        temp = embedded.clone().detach()
-
-        if mode == 'replace':
-            temp[:, indices] = cod[:, indices]
-            cod = temp
-        elif mode == 'add':
-            temp[:, indices] = 0.75 * temp[:, indices] + 0.25 * cod[:, indices]
-            cod = temp
-
-        if normalize is None:
-            normalize = [True, False][torch.randint(low=0, high=2, size=(1,)).item()]
-        if normalize:
-            cod_norm = torch.atleast_2d(cod.norm(dim=1, p=1)).T
-            cod.div_(cod_norm).mul_(norm)
-        return cod
