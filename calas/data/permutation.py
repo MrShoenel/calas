@@ -350,13 +350,7 @@ class Normal2Normal_Grad(Dist2Dist[T]):
         clz_int = torch.atleast_1d(classes.squeeze().to(torch.int64))
         b = batch # The given data must be in B-space for these permutations!
 
-        flow_means, flow_stds = self.flow_locs_and_scales(classes=classes)
-
-        b_means = b.mean(dim=1).unsqueeze(-1).repeat(1, self.flow.num_dims)
-        b_stds = b.std(dim=1).unsqueeze(-1).repeat(1, self.flow.num_dims)
-
-        use_means = 0.2 * flow_means + 0.8 * b_means
-        use_stds = 0.2 * flow_stds + 0.8 * b_stds
+        use_means, use_stds = self.averaged_locs_and_scales(batch=batch, classes=classes)
         u = self.u_like(input=b)
 
         if self.method == 'hybrid':
