@@ -102,7 +102,7 @@ class Synthesis:
                     break
         
         if len(results) == 0:
-            return torch.empty(size=(0, sample.shape[1]), device=sample.dev), torch.empty(size=(0, classes.shape[1]), device=classes.device)
+            return torch.empty(size=(0, sample.shape[1]), device=sample.device), torch.empty(size=(0,), device=classes.device)
         
         done = torch.vstack(tensors=results)
         done_classes = torch.cat(results_classes)
