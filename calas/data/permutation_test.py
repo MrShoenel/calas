@@ -64,26 +64,27 @@ def test_N2N_Grad(lik: Likelihood, fitted: bool):
     assert (res.sum() / samp.shape[0]) > 0.999
 
 
-@mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease])
-@mark.parametrize('means_grad', [True, False])
-def test_N2N_no_Grad(lik: Likelihood, means_grad: bool):
+@mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease], ids=['inc', 'dec'])
+@mark.parametrize('base_grad', [True, False], ids=['bg', 'no_bg'])
+@mark.parametrize('fitted', [True, False], ids=['fit', 'not_fit'])
+@mark.parametrize('method', ['loc_scale', 'quantiles'])
+def test_N2N_no_Grad(lik: Likelihood, base_grad: bool, fitted: bool, method: Literal['loc_scale', 'quantiles']):
     torch.manual_seed(0)
-    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
-    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
-    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
-    samp_class = torch.full((100,), 0.).to(device=dev)
+    flow, samp, samp_class = (trained if fitted else untrained).all
     samp_b = flow.X_to_B(input=samp, classes=samp_class)[0]
 
-    n2n_ng = Normal2Normal_NoGrad(flow=flow, seed=0, u_min=0.01, u_max=0.01, stds_step_perc=0.025, use_loc_scale_base_grad=means_grad, method='loc_scale')
+    # NOTE: `u` determines the step size. Under a fitted model and without
+    # a guiding (base) gradient, this step size should be much smaller, or
+    # otherwise, this move naiive method will overshoot and fail to confidently
+    # push the likelihood towards the desired direction.
+    use_u = 0.001 if fitted and not base_grad else 0.01
+    n2n_ng = Normal2Normal_NoGrad(flow=flow, seed=0, u_min=use_u, u_max=use_u, stds_step_perc=0.025, use_loc_scale_base_grad=base_grad, method='loc_scale', grad_scaling=GradientScaling.Normalize)
     perm_b = n2n_ng.permute(batch=samp_b, classes=samp_class, likelihood=lik)
 
     num_corr = (flow.log_rel_lik_B(samp_b, samp_class) < flow.log_rel_lik_B(perm_b, samp_class)).sum() if lik == Likelihood.Increase else (flow.log_rel_lik_B(samp_b, samp_class) > flow.log_rel_lik_B(perm_b, samp_class)).sum()
 
-    if means_grad:
-        # This works only approximately, because it ignores the log-det!
-        assert (num_corr / samp.shape[0]) > 0.97
-    else:
-        assert num_corr == samp.shape[0]
+    assert num_corr == samp.shape[0]
+        
 
 
 @mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease])

@@ -430,14 +430,21 @@ class Normal2Normal_Grad(Dist2Dist[T], GradientMixin):
         return self._permute_hybrid_or_quantiles(hybrid=False, base=base, u=u, use_means=use_means, use_stds=use_stds, classes=classes, likelihood=likelihood)
 
 
-class Normal2Normal_NoGrad(Dist2Dist[T]):
+class Normal2Normal_NoGrad(Dist2Dist[T], GradientMixin):
     """
     Performs distributional modifications similar to :code:`Normal2Normal_Grad`, but without
     using gradient information of the underlying entire model (e.g., the entire flow and its
     representation). It can, however, use very light gradient information of the base distribution,
     which is computationally inexpensive.
 
-    This class operates in base space (B) exclusively and modifies samples there. Samples are
+    NOTE: This method, when used without the (base) gradient, become very sensitive to the choice
+    of `u`. As a rule of thumb, the more well-trained the model becomes, the smaller `u` should be.
+    Otherwise, the model will likely overshoot and not produce the desired likelihoods. Since it is
+    considered computationally cheap, it is recommended to set `use_loc_scale_base_grad=True` (this
+    is the default) and use some some gradient scaling, as this will effectively allow to use a
+    constant `u`.
+
+    NOTE: This class operates in base space (B) exclusively and modifies samples there. Samples are
     modified using one of two (three) methods:
 
     The first method, `loc_scale`, modifies a sample under its assumed normal distribution by first
@@ -452,9 +459,17 @@ class Normal2Normal_NoGrad(Dist2Dist[T]):
     using that information. Even though we use the gradient here, this method is not considered to
     be expensive, because it is just the gradient of the normal distribution's PDF, not the entire
     flow and its representation.
+
+    The second method, `quantiles`, is the first, initially suggested method for adjusting the
+    likelihood of samples under a normalizing flow with a normal base distribution. It *linearly*
+    modifies the sample by altering its quantiles under an assumed and averaged normal distribution.
+    For increasing the likelihood, it alters the quantiles such that they move towards the median.
+    For decreasing the likelihood, the quantiles are pushed away from the median.
     """
-    def __init__(self, flow: T, method: Literal['loc_scale', 'quantiles'], use_loc_scale_base_grad: bool=False, u_min: float=0.001, u_max: float=0.001, u_frac_negative: float=0.0, locs_scales_mode: LocsScales=LocsScales.Individual, locs_scales_flow_frac: float=0.2, stds_step_perc: float=0.025, seed: Optional[int]=0):
-        super().__init__(flow=flow, seed=seed, u_min=u_min, u_max=u_max, u_frac_negative=u_frac_negative, locs_scales_mode=locs_scales_mode, locs_scales_flow_frac=locs_scales_flow_frac)
+    def __init__(self, flow: T, method: Literal['loc_scale', 'quantiles'], use_loc_scale_base_grad: bool=True, u_min: float=0.001, u_max: float=0.001, u_frac_negative: float=0.0, locs_scales_mode: LocsScales=LocsScales.Individual, locs_scales_flow_frac: float=0.2, stds_step_perc: float=0.025, grad_scaling: GradientScaling=GradientScaling.Normalize, seed: Optional[int]=0):
+        Dist2Dist.__init__(self=self, flow=flow, seed=seed, u_min=u_min, u_max=u_max, u_frac_negative=u_frac_negative, locs_scales_mode=locs_scales_mode, locs_scales_flow_frac=locs_scales_flow_frac)
+        GradientMixin.__init__(self=self, scaling=grad_scaling)
+
         self.stds_step_perc = stds_step_perc
         self.method = method
         self.use_loc_scale_base_grad = use_loc_scale_base_grad
@@ -494,17 +509,11 @@ class Normal2Normal_NoGrad(Dist2Dist[T]):
 
     def permute_loc_scale_base_grad(self, batch: Tensor, use_means: Tensor, use_stds: Tensor, likelihood: Likelihood, u: Tensor) -> Tensor:
         means_grad, stds_grad = self.lik_fn_grad(batch, use_means, use_stds)
-        means_grad_sign, stds_grad_sign = torch.sign(input=means_grad), torch.sign(input=stds_grad)
-        means_grad, stds_grad = torch.abs(means_grad), torch.abs(stds_grad)
 
-        if likelihood == Likelihood.Increase:
-            means_grad_sign *= -1.
-            stds_grad_sign *= -1.
-        
-        means_grad_weight = means_grad.reciprocal() / means_grad.reciprocal().max()
+        means_grad_sign, means_grad_weight = self.prepare_grad(grad=means_grad, likelihood=likelihood).sign_weight
+        stds_grad_sign, stds_grad_weight = self.prepare_grad(grad=stds_grad, likelihood=likelihood).sign_weight
+
         means_prime = use_means + means_grad_sign * means_grad_weight * u
-
-        stds_grad_weight = stds_grad.reciprocal() / stds_grad.reciprocal().max()
         stds_prime = use_stds + stds_grad_sign * stds_grad_weight * u
 
         return means_prime, stds_prime
@@ -514,7 +523,7 @@ class Normal2Normal_NoGrad(Dist2Dist[T]):
         """
         This is the first, originally proposed method. It *linearly* (depending on `u`) modifies the
         sample by altering its quantiles under the currently assumed normal distribution. Usually,
-        `u` is drawn uniformly (hence the name), which means that the modified sample will approximately
+        `u` is drawn uniformly (hence the name), which means that the modified sample will approx.
         follow the same distribution(-family; here: normal).
         """
         lamb = torch.where(q < 0.5, 1., -1.).to(dtype=q.dtype)
