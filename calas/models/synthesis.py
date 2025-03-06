@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 from typing import Self
-from ..data.permutation import Likelihood, Permute, Space, T
+from ..data.permutation import Likelihood, Permute, SampleTooSmallException, Space, T
 
 
 
@@ -49,7 +49,7 @@ class Synthesis:
         raise Exception(f'Going from Space {old} to Space {new} is not supported!')
     
 
-    def synthesize(self, sample: Tensor, classes: Tensor, target_lik: float, likelihood: Likelihood, max_steps: int=20):
+    def synthesize(self, sample: Tensor, classes: Tensor, target_lik: float, target_lik_crit: float, likelihood: Likelihood, max_steps: int=20):
         assert len(self.perms) > 0
         clz_int = classes.squeeze().to(dtype=torch.int64)
         liks = self.log_rel_lik(sample=sample, classes=clz_int, space=self.space_in)
@@ -57,17 +57,29 @@ class Synthesis:
         results: list[Tensor] = []
         results_classes: list[Tensor] = []
         steps = 0
+        old_space = self.space_in
         while steps < max_steps and sample.shape[0] > 0:
             steps += 1
 
-            old_space = self.space_in
             for perm in self.perms:
+                sample_prime: Tensor = None
                 # First make sure the to-permute sample is in the correct space!
                 sample_prime = self.space_2_space(sample=sample, classes=clz_int, old=old_space, new=perm.space_in)
                 old_space = perm.space_out
-                
-                sample_prime = perm.permute(batch=sample_prime, classes=clz_int, likelihood=likelihood)
+                with perm:
+                    try:
+                        sample_prime = perm.permute(batch=sample_prime, classes=clz_int, likelihood=likelihood)
+                    except SampleTooSmallException:
+                        continue
                 sample_prime_liks = self.log_rel_lik(sample=sample_prime, classes=clz_int, space=perm.space_out)
+
+                # Let's look at samples that went too far first and reset them.
+                mask_critical = torch.where(sample_prime_liks < target_lik_crit, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > target_lik_crit, True, False)
+
+                if torch.any(mask_critical).item():
+                    sample_prime[mask_critical] = sample[mask_critical]
+                    sample_prime_liks[mask_critical] = liks[mask_critical]
+
 
                 mask_replace = torch.where(sample_prime_liks < liks, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > liks, True, False)
 
@@ -81,14 +93,19 @@ class Synthesis:
                 if torch.any(mask_accept).item():
                     results.append(sample_prime[mask_accept])
                     results_classes.append(clz_int[mask_accept])
-                # Now remove these samples from the to-do list!
-                clz_int = clz_int[~mask_accept]
-                liks = liks[~mask_accept]
-                sample = sample[~mask_accept]
+                    # Now remove these samples from the to-do list!
+                    clz_int = clz_int[~mask_accept]
+                    liks = liks[~mask_accept]
+                    sample = sample[~mask_accept]
 
                 if sample.shape[0] == 0:
                     break
         
         if len(results) == 0:
             return torch.empty(size=(0, sample.shape[1]), device=sample.dev), torch.empty(size=(0, classes.shape[1]), device=classes.device)
-        return torch.vstack(tensors=results), torch.cat(results_classes)
+        
+        done = torch.vstack(tensors=results)
+        done_classes = torch.cat(results_classes)
+        done = self.space_2_space(sample=done, classes=done_classes, old=old_space, new=self.space_out)
+
+        return done, done_classes
