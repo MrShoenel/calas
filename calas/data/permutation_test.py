@@ -16,7 +16,7 @@ dev = device('cuda' if cuda.is_available() else 'cpu')
 dty = torch.float32
 
 
-from ..models.synthesis_test import trained, untrained
+from .synthesis_test import trained, untrained
 
 
 

@@ -1,13 +1,13 @@
 import torch
 from torch import device, cuda, Tensor
 from .synthesis import Synthesis
-from ..data.permutation import Space, Likelihood, Data2Data_Grad, Normal2Normal_Grad, Normal2Normal_NoGrad, CurseOfDimDataPermute
-from .flow import CalasFlowWithRepr
-from .flow_test import make_flows
-from .repr import AE_UNet_Repr
+from ..data.permutation import Space, Likelihood, Data2Data_Grad, CurseOfDimDataPermute
+from ..models.flow import CalasFlowWithRepr
+from ..models.flow_test import make_flows
+from ..models.repr import AE_UNet_Repr
 from ..tools.two_moons import two_moons_rejection_sampling
 from ..tools.lazy import Lazy
-from pytest import mark, fixture
+from pytest import mark
 
 
 dev = device('cuda' if cuda.is_available() else 'cpu')
