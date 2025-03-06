@@ -239,17 +239,18 @@ class Dist2Dist(Permute[T], ABC):
             self.locs_scales_flow_frac * flow_stds + (1.0 - self.locs_scales_flow_frac) * batch_stds
 
 
-class Data2Data_Grad(PermuteData[T]):
+class Data2Data_Grad(PermuteData[T], GradientMixin):
     """
     A same-space permutation that updates the input using the gradient with
     regard to the appropriate loss function.
     """
-    def __init__(self, flow: T, space: Space, u_min: float=0.01, u_max: float=0.01, scale_grad: bool=True, seed: Optional[int]=0):
-        super().__init__(flow=flow, seed=seed, u_min=u_min, u_max=u_max)
+    def __init__(self, flow: T, space: Space, u_min: float=0.01, u_max: float=0.01, grad_scale: GradientScaling=GradientScaling.NormalizeInv, seed: Optional[int]=0):
+        PermuteData.__init__(self=self, flow=flow, seed=seed, u_min=u_min, u_max=u_max)
+        GradientMixin.__init__(self=self, scaling=grad_scale)
+
         if space == Space.Quantiles:
             raise Exception(f'The Quantiles-space is not supported. Modifying data through their quantiles requires the assumption of a (normal) distribution. That means you are effectively doing a normal-2-normal (distributional) permutation using gradient information. That is already covered in classes `Normal2Normal_Grad` (using one of the methods `loc_scale`, `quantiles`, or `hybrid`) and `Normal2Normal_NoGrad` (using method `quantiles`).')
         
-        self.scale_grad = scale_grad
         self.space = space
     
     
@@ -280,17 +281,14 @@ class Data2Data_Grad(PermuteData[T]):
         # 'batch' could be in any of these 3 spaces.
         loss_fn_grad = self.flow.loss_wrt_X_grad if self.space == Space.Data else (self.flow.loss_wrt_E_grad if self.space == Space.Embedded else self.flow.loss_wrt_B_grad)
 
-        grad = loss_fn_grad(batch, clz_int)
         # The gradient points in the direction where the *loss* gets larger,
         # which is the same as the likelihood getting *lower*. So, we have to
         # conditionally inverse their relation as per default, it will decrease
-        # the likelihood.
-        grad_sign = torch.sign(grad)
-        grad = torch.abs(grad)
-        if likelihood == Likelihood.Increase:
-            grad_sign *= -1.
+        # the likelihood. Gradient.prepare takes care of that by inversing the
+        # sign when likelihood=Increase.
+        grad = loss_fn_grad(batch, clz_int)
+        grad_sign, grad_weight = self.prepare_grad(grad=grad, likelihood=likelihood).sign_weight
         
-        grad_weight = grad.reciprocal() / grad.reciprocal().max() if self.scale_grad else 1.
         u = self.u_like(input=batch)
         batch_prime = batch + grad_sign * grad_weight * u
         return batch_prime
