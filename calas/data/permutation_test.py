@@ -16,15 +16,16 @@ dev = device('cuda' if cuda.is_available() else 'cpu')
 dty = torch.float32
 
 
+from ..models.synthesis_test import trained, untrained
+
+
 
 @mark.parametrize('space', [Space.Data, Space.Embedded, Space.Base])
 @mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease])
-def test_PermuteData_in_space(space: Space, lik: Likelihood):
+@mark.parametrize('fitted', [True, False])
+def test_PermuteData_in_space(space: Space, lik: Likelihood, fitted: bool):
     torch.manual_seed(0)
-    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
-    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
-    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
-    samp_class = torch.full((100,), 0.).to(device=dev)
+    flow, samp, samp_class = (trained if fitted else untrained).all
 
     lik_fn = flow.log_rel_lik_X if space == Space.Data else (flow.log_rel_lik_E if space == Space.Embedded else flow.log_rel_lik_B)
     if space == Space.Data:
@@ -40,7 +41,7 @@ def test_PermuteData_in_space(space: Space, lik: Likelihood):
     perm = pdg.permute(batch=samp, classes=samp_class, likelihood=lik)
 
     # This modification works best in E!
-    thresh = 0.98 if space == Space.Embedded else (0.9 if space == Space.Base else 0.65)
+    thresh = 0.98 if space == Space.Embedded else (0.92 if space == Space.Base else 0.65)
     num_corr = (lik_fn(samp, samp_class) < lik_fn(perm, samp_class)).sum() if lik == Likelihood.Increase else (lik_fn(samp, samp_class) > lik_fn(perm, samp_class)).sum()
     
     assert (num_corr / samp.shape[0]) > thresh
