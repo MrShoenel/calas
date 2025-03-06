@@ -16,6 +16,9 @@ from warnings import warn
 T = TypeVar(name='T', bound=CalasFlow)
 
 
+class SampleTooSmallException(Exception): pass
+
+
 @final
 class Space(StrEnum):
     Data = 'X'
@@ -567,8 +570,10 @@ class CurseOfDimDataPermute(PermuteData[T]):
         """
         NOTE: The argument `likelihood` is not supported here and ignored.
         """
-        
-        assert batch.dim() == 2 and batch.shape[0] > 1, 'A 2D tensor with two or more samples is required.'
+
+        assert batch.dim() == 2
+        if batch.shape[0] < 2:
+            raise SampleTooSmallException('A 2D tensor with two or more samples is required.')
 
         mean, std, norm = batch.mean(dim=0), batch.std(dim=0), torch.atleast_2d(batch.norm(dim=1, p=1)).T
 
