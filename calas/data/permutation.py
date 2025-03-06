@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import torch.nn.functional as F
 from torch import Tensor
 from torch.func import jacrev
 from ..models.flow import CalasFlow
@@ -7,10 +8,11 @@ from ..tools.func import normal_cdf, normal_ppf_safe, normal_log_pdf
 from torch.distributions.normal import Normal
 from torch.distributions.uniform import Uniform
 from types import TracebackType
-from typing import Generic, TypeVar, Self, Optional, Literal, override, final, Callable
+from typing import Generic, TypeVar, Self, Optional, Literal, override, final, Callable, Union
 from abc import ABC, abstractmethod
 from enum import Enum, StrEnum
 from warnings import warn
+from dataclasses import dataclass
 
 
 T = TypeVar(name='T', bound=CalasFlow)
@@ -64,7 +66,63 @@ class LocsScales(Enum):
     Computes the means and standard deviation over an entire batch and averages
     the results."""
 
- 
+
+
+@final
+class GradientScaling(Enum):
+    NoScale = 1
+    Normalize = 2
+    NormalizeInv = 3
+    Softmax = 4
+    SoftmaxInv = 5
+
+
+@dataclass
+class Gradient:
+    abs: Tensor
+    sign: Tensor
+    weight: Union[Tensor, float]
+    scale: GradientScaling
+    likelihood: Likelihood
+
+    @property
+    def sign_weight(self) -> tuple[Tensor, Tensor]:
+        return self.sign, self.weight
+
+    @property
+    def abs_sign_weight(self) -> tuple[Tensor, Tensor, Union[Tensor, float]]:
+        return self.abs, self.sign, self.weight
+
+    @staticmethod
+    def prepare(grad: Tensor, likelihood: Likelihood, scale: GradientScaling=GradientScaling.SoftmaxInv) -> 'Gradient':
+        g_sign = torch.sign(grad) * (-1. if likelihood == Likelihood.Increase else 1.)
+        g_abs = torch.abs(grad)
+        del grad
+        
+        g_weight: Union[Tensor, float] = None
+        match scale:
+            case GradientScaling.NoScale:
+                g_weight = 1.0
+            case GradientScaling.Normalize:
+                g_weight = g_abs / g_abs.max()
+            case GradientScaling.NormalizeInv:
+                recp = g_abs.reciprocal()
+                g_weight = recp / recp.max()
+            case GradientScaling.Softmax:
+                g_weight = F.softmax(g_abs, dim=1)
+            case GradientScaling.SoftmaxInv:
+                g_weight = F.softmax(g_abs.reciprocal(), dim=1)
+        
+        return Gradient(abs=g_abs, sign=g_sign, weight=g_weight, scale=scale, likelihood=likelihood)
+
+
+
+class GradientMixin():
+    def __init__(self, scaling: GradientScaling):
+        self.grad_scaling = scaling
+
+    def prepare_grad(self, grad: Tensor, likelihood: Likelihood) -> Gradient:
+        return Gradient.prepare(grad=grad, likelihood=likelihood, scale=self.grad_scaling)
 
 
 
