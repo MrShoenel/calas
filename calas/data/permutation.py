@@ -225,6 +225,7 @@ class Data2Data_Grad(PermuteData[T]):
         # conditionally inverse their relation as per default, it will decrease
         # the likelihood.
         grad_sign = torch.sign(grad)
+        grad = torch.abs(grad)
         if likelihood == Likelihood.Increase:
             grad_sign *= -1.
         

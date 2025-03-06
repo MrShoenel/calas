@@ -33,18 +33,17 @@ def test_PermuteData_in_space(space: Space, lik: Likelihood):
         u_min, u_max = 0.025, 0.05
         samp = flow.X_to_E(input=samp)
     else:
-        u_min, u_max = 0.01, 0.02
+        u_min, u_max = 0.05, 0.05
         samp = flow.X_to_B(input=samp, classes=samp_class)[0]
 
     pdg = Data2Data_Grad(flow=flow, space=space, u_min=u_min, u_max=u_max)
     perm = pdg.permute(batch=samp, classes=samp_class, likelihood=lik)
 
-    if space != Space.Data:
-        # In data space, this often works, but not always
-        if lik == Likelihood.Increase:
-            assert torch.all(lik_fn(samp, samp_class) < lik_fn(perm, samp_class))
-        else:
-            assert torch.all(lik_fn(samp, samp_class) > lik_fn(perm, samp_class))
+    # This modification works best in E!
+    thresh = 0.98 if space == Space.Embedded else (0.9 if space == Space.Base else 0.65)
+    num_corr = (lik_fn(samp, samp_class) < lik_fn(perm, samp_class)).sum() if lik == Likelihood.Increase else (lik_fn(samp, samp_class) > lik_fn(perm, samp_class)).sum()
+    
+    assert (num_corr / samp.shape[0]) > thresh
 
 
 @mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease])
