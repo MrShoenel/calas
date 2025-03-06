@@ -75,28 +75,34 @@ trained = Trained(max_steps=10)
 
 
 
-@mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease])
-def test_Synthesis_e2e(lik: Likelihood, space: Space=Space.Embedded):
-    flow, holdout, samp_clz = trained.flow, trained.testdata, trained.testdata_clz
+@mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease], ids=['inc', 'dec'])
+@mark.parametrize('fitted', [True, False], ids=['fit', 'not_fit'])
+def test_Synthesis_e2e(lik: Likelihood, fitted: bool, space: Space=Space.Embedded):
+    torch.manual_seed(0)
+    flow, holdout, samp_clz = (trained if fitted else untrained).all
     holdout, samp_clz = holdout[0:20], samp_clz[0:20]
     samp_E = flow.X_to_E(input=holdout)
 
     synth = Synthesis(flow=flow, space_in=space, space_out=space)
 
-    synth.add_permutation(Data2Data_Grad(flow=flow, space=space, u_min=0.25, u_max=0.5))
+    synth.add_permutation(Data2Data_Grad(flow=flow, space=space, u_min=0.1, u_max=0.15))
     # synth.add_permutation(Normal2Normal_Grad(flow=flow, method='hybrid', u_min=1.0, u_max=1.0))
     synth.add_permutation(CurseOfDimDataPermute(flow=flow, space=space, num_dims=(5,15), use_grad_dir=False))
-    synth.add_permutation(Normal2Normal_NoGrad(flow=flow, method='quantiles', u_min=0.05, u_max=0.05))
+    # synth.add_permutation(Normal2Normal_NoGrad(flow=flow, method='quantiles', u_min=0.05, u_max=0.05))
 
-    # Here in this test, we will lower the likelihood! Actually, since we added
-    # 'CurseOfDimDataPermute' to the pipeline, we cannot make it better (well,
-    # we could, by giving it low weight and letting the others improve the sample,
-    # that should make for an interesting test).
     liks_before = synth.log_rel_lik(sample=samp_E, classes=samp_clz, space=space)
     target_lik = liks_before.min() + (1. if lik == Likelihood.Increase else -1.) * 5 * liks_before.std()
     target_lik_crit = target_lik + (1. if lik == Likelihood.Increase else -1.) * 15 * liks_before.std()
 
-    samp_E_prime, samp_prime_clz = synth.synthesize(sample=samp_E, classes=samp_clz, target_lik=target_lik, target_lik_crit=target_lik_crit, likelihood=lik, max_steps=100)
+    samp_E_prime, samp_prime_clz = synth.synthesize(sample=samp_E, classes=samp_clz, target_lik=target_lik, target_lik_crit=target_lik_crit, likelihood=lik, max_steps=10)
     liks_after = synth.log_rel_lik(sample=samp_E_prime, classes=samp_prime_clz, space=space)
 
-    print(5) # TODO: Debug likelihood difference
+    # Perhaps we get back fewer samples!
+    assert samp_E.shape[0] >= int(0.95 * samp_E.shape[0])
+
+    if lik == Likelihood.Decrease:
+        assert torch.all(liks_after <= target_lik)
+        assert torch.all(liks_after >= target_lik_crit)
+    else:
+        assert torch.all(liks_after >= target_lik)
+        assert torch.all(liks_after <= target_lik_crit)
