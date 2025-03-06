@@ -294,7 +294,7 @@ class Data2Data_Grad(PermuteData[T], GradientMixin):
         return batch_prime
 
 
-class Normal2Normal_Grad(Dist2Dist[T]):
+class Normal2Normal_Grad(Dist2Dist[T], GradientMixin):
     """
     Changes the distribution of one or more samples using one of three methods. In
     either case we assume each sample follows an approximate normal distribution
@@ -324,12 +324,13 @@ class Normal2Normal_Grad(Dist2Dist[T]):
     between both spaces. This is a somewhat special case; usually you would want
     the method 'quantiles' instead.
     """
-    def __init__(self, flow: T, method: Literal['loc_scale', 'quantiles', 'hybrid'], u_min: float=0.001, u_max: float=0.05, u_frac_negative: float=0.0, scale_grad: bool=True, seed: Optional[int]=0):
-        super().__init__(flow=flow, seed=seed, u_min=u_min, u_max=u_max, u_frac_negative=u_frac_negative)
+    def __init__(self, flow: T, method: Literal['loc_scale', 'quantiles', 'hybrid'], u_min: float=0.001, u_max: float=0.05, u_frac_negative: float=0.0, grad_scaling: GradientScaling=GradientScaling.Softmax, seed: Optional[int]=0):
+        Dist2Dist.__init__(self=self, flow=flow, seed=seed, u_min=u_min, u_max=u_max, u_frac_negative=u_frac_negative)
+        GradientMixin.__init__(self=self, scaling=grad_scaling)
+
         self.method = method
         self.u_min = u_min
         self.u_max = u_max
-        self.scale_grad = scale_grad
     
 
     @property
@@ -379,16 +380,11 @@ class Normal2Normal_Grad(Dist2Dist[T]):
         
         loss_fn_grad = jacrev(func=loss_fn, argnums=(0,1))
         means_grad, stds_grad = loss_fn_grad(use_means, use_stds)
-        means_grad_sign, stds_grad_sign = torch.sign(input=means_grad), torch.sign(input=stds_grad)
-        means_grad, stds_grad = torch.abs(means_grad), torch.abs(stds_grad)
-        if likelihood == Likelihood.Increase:
-            means_grad_sign *= -1.
-            stds_grad_sign *= -1.
-        
-        means_grad_weight = means_grad.reciprocal() / means_grad.reciprocal().max() if self.scale_grad else 1.
-        means_prime = use_means + means_grad_sign * means_grad_weight * u
 
-        stds_grad_weight = stds_grad.reciprocal() / stds_grad.reciprocal().max() if self.scale_grad else 1.
+        means_grad_sign, means_grad_weight = self.prepare_grad(grad=means_grad, likelihood=likelihood).sign_weight
+        stds_grad_sign, stds_grad_weight = self.prepare_grad(grad=stds_grad, likelihood=likelihood).sign_weight
+
+        means_prime = use_means + means_grad_sign * means_grad_weight * u
         stds_prime = use_stds + stds_grad_sign * stds_grad_weight * u
 
         b_prime = torch.vmap(normal_ppf_safe)(q, means_prime, stds_prime)

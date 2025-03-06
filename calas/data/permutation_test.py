@@ -6,9 +6,9 @@ from ..tools.two_moons import two_moons_rejection_sampling
 from ..models.flow_test import make_flows
 from ..models.repr import AE_UNet_Repr
 from ..tools.func import normal_cdf, normal_ppf_safe
-from .permutation import Space, Likelihood, LocsScales, Data2Data_Grad, Normal2Normal_Grad, Normal2Normal_NoGrad, CurseOfDimDataPermute, PermuteDims
+from .permutation import Space, Likelihood, LocsScales, GradientScaling, Data2Data_Grad, Normal2Normal_Grad, Normal2Normal_NoGrad, CurseOfDimDataPermute, PermuteDims
 from pytest import mark
-from typing import Callable
+from typing import Callable, Literal
 
 
 
@@ -48,21 +48,20 @@ def test_PermuteData_in_space(space: Space, lik: Likelihood, fitted: bool):
 
 
 @mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease])
-def test_N2N_Grad(lik: Likelihood):
+@mark.parametrize('fitted', [True, False])
+def test_N2N_Grad(lik: Likelihood, fitted: bool):
     torch.manual_seed(0)
-    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
-    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
-    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
-    samp_class = torch.full((100,), 0.).to(device=dev)
+    flow, samp, samp_class = (trained if fitted else untrained).all
+
     samp_b = flow.X_to_B(input=samp, classes=samp_class)[0]
 
-    n2ng = Normal2Normal_Grad(flow=flow, method='loc_scale')
+    n2ng = Normal2Normal_Grad(flow=flow, method='loc_scale', grad_scaling=GradientScaling.Softmax)
     perm_b = n2ng.permute(batch=samp_b, classes=samp_class, likelihood=lik)
 
     res = flow.log_rel_lik_B(samp_b, samp_class) < flow.log_rel_lik_B(perm_b, samp_class)
     if lik == Likelihood.Decrease:
         res = ~res
-    assert torch.all(res)
+    assert (res.sum() / samp.shape[0]) > 0.999
 
 
 @mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease])
