@@ -584,7 +584,7 @@ class Normal2Normal_NoGrad(Dist2Dist[T], GradientMixin):
         return batch_prime
 
 
-class CurseOfDimDataPermute(PermuteData[T]):
+class CurseOfDimDataPermute(PermuteData[T], GradientMixin):
     """
     Permutations applied directly to the data that exploit the curse of
     dimensionality in order to systematically and gradully destroy their
@@ -596,8 +596,9 @@ class CurseOfDimDataPermute(PermuteData[T]):
     use the gradient direction. For some arbitrary space, set this to `False`
     and specify an arbitrary :code:`Space`.
     """
-    def __init__(self, flow: T, space: Space, distr: Literal['Normal', 'Uniform']|None=None, num_dims: tuple[int,int]=(0,1), mode: Literal['replace', 'add']|None=None, use_grad_dir: bool|None=None, normalize: bool|None=True, scale_grad: bool=True, u_min: float=0.01, u_max: float=0.01, u_frac_negative: float=0.0, seed: Optional[int]=0):
-        super().__init__(flow=flow, seed=seed, u_min=u_min, u_max=u_max, u_frac_negative=u_frac_negative)
+    def __init__(self, flow: T, space: Space, distr: Literal['Normal', 'Uniform']|None=None, num_dims: tuple[int,int]=(1,1), mode: Literal['replace', 'add']|None=None, use_grad_dir: bool|None=None, normalize: bool|None=True, grad_scaling: GradientScaling=GradientScaling.NoScale, u_min: float=0.01, u_max: float=0.01, u_frac_negative: float=0.0, seed: Optional[int]=0):
+        PermuteData.__init__(self=self, flow=flow, seed=seed, u_min=u_min, u_max=u_max, u_frac_negative=u_frac_negative)
+        GradientMixin.__init__(self=self, scaling=grad_scaling)
         
         if space == Space.Quantiles and use_grad_dir:
             raise Exception('Taking the loss w.r.t. quantiles requires the assumption of a distribution, which we do not have here. Choose another space or disable `use_grad_dir`.')
@@ -608,7 +609,6 @@ class CurseOfDimDataPermute(PermuteData[T]):
         self.mode = mode
         self.use_grad_dir = use_grad_dir
         self.normalize = normalize
-        self.scale_grad = scale_grad
     
 
     @property
@@ -646,10 +646,8 @@ class CurseOfDimDataPermute(PermuteData[T]):
             grad_fn = self.flow.loss_wrt_X_grad if self.space == Space.Data else (self.flow.loss_wrt_E_grad if self.space == Space.Embedded else self.flow.loss_wrt_B_grad)
             
             grad = grad_fn(batch, classes)
-            grad_sign = torch.sign(grad)
-            grad = torch.abs(grad)
-            grad_weight = grad.reciprocal() / grad.reciprocal().max() if self.scale_grad else 1.
-            
+            grad_sign, grad_weight = self.prepare_grad(grad=grad, likelihood=likelihood).sign_weight
+
             u = self.u_like(cod)
             cod = cod + grad_sign * grad_weight * u
         
@@ -660,7 +658,7 @@ class CurseOfDimDataPermute(PermuteData[T]):
         use_num_dims = a if a == b else self.gen.integers(low=a, high=b+1, size=(1,)).item()
         
         
-        indices = torch.randperm(batch.shape[1])[0:use_num_dims]
+        indices = self.gen.permutation(batch.shape[1]).tolist()[0:use_num_dims]
         temp = batch.clone()
 
         mode = self.mode
@@ -671,7 +669,7 @@ class CurseOfDimDataPermute(PermuteData[T]):
             temp[:, indices] = cod[:, indices]
             cod = temp
         elif mode == 'add':
-            temp[:, indices] = 0.75 * temp[:, indices] + 0.25 * cod[:, indices]
+            temp[:, indices] = 0.5 * temp[:, indices] + 0.5 * cod[:, indices]
             cod = temp
 
         normalize = self.normalize

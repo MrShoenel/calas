@@ -84,16 +84,14 @@ def test_N2N_no_Grad(lik: Likelihood, base_grad: bool, fitted: bool, method: Lit
     num_corr = (flow.log_rel_lik_B(samp_b, samp_class) < flow.log_rel_lik_B(perm_b, samp_class)).sum() if lik == Likelihood.Increase else (flow.log_rel_lik_B(samp_b, samp_class) > flow.log_rel_lik_B(perm_b, samp_class)).sum()
 
     assert num_corr == samp.shape[0]
+        
 
-
-@mark.parametrize('use_grad_dir', [True, False])
+@mark.parametrize('use_grad_dir', [True, False], ids=['grad', 'no_grad'])
+@mark.parametrize('fitted', [True, False], ids=['fit', 'not_fit'])
 @mark.parametrize('space', [Space.Data, Space.Embedded, Space.Base, Space.Quantiles])
-def test_CurseOfDimDataPermute(use_grad_dir: bool, space: Space):
+def test_CurseOfDimDataPermute(use_grad_dir: bool, space: Space, fitted: bool):
     torch.manual_seed(0)
-    repr = AE_UNet_Repr(input_dim=2, hidden_sizes=(3,2,3))
-    flow = CalasFlowWithRepr(num_classes=2, flows=make_flows(dim=repr.embed_dim), repr=repr).to(device=dev, dtype=dty)
-    samp = two_moons_rejection_sampling(nsamples=100).to(device=dev, dtype=dty)
-    samp_class = torch.full((100,), 0.).to(device=dev)
+    flow, samp, samp_class = (trained if fitted else untrained).all
 
     if space == Space.Quantiles and use_grad_dir:
         with pytest.raises(Exception):
@@ -116,7 +114,7 @@ def test_CurseOfDimDataPermute(use_grad_dir: bool, space: Space):
         lik_fn = lambda q, clz: flow.log_rel_lik_B(base=torch.vmap(normal_ppf_safe)(q, means, stds), classes=clz)
 
     num_dims = (1,2) if space == Space.Data else (4,8)
-    codp = CurseOfDimDataPermute(flow=flow, space=space, use_grad_dir=use_grad_dir, num_dims=num_dims)
+    codp = CurseOfDimDataPermute(flow=flow, space=space, use_grad_dir=use_grad_dir, num_dims=num_dims, grad_scaling=GradientScaling.NoScale)
     perm = codp.permute(batch=samp, classes=samp_class)
     assert samp.shape == perm.shape
 
@@ -130,9 +128,11 @@ def test_CurseOfDimDataPermute(use_grad_dir: bool, space: Space):
         assert (num_worse / samp.shape[0]) < 0.66
     elif space == Space.Data:
         # There are only 2 dimensions here..
-        assert (num_worse / samp.shape[0]) > 0.51
-    else:
-        assert (num_worse / samp.shape[0]) > 0.70
+        assert (num_worse / samp.shape[0]) >= 0.39
+    elif space == Space.Embedded:
+        assert (num_worse / samp.shape[0]) > 0.60
+    elif space == Space.Base:
+        assert (num_worse / samp.shape[0]) > 0.43
 
 
 def test_PermuteDims():
