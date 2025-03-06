@@ -21,9 +21,9 @@ from ..models.synthesis_test import trained, untrained
 
 
 @mark.parametrize('space', [Space.Data, Space.Embedded, Space.Base])
-@mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease])
+@mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease], ids=['inc', 'dec'])
 @mark.parametrize('fitted', [True, False], ids=['fit', 'not_fit'])
-def test_PermuteData_in_space(space: Space, lik: Likelihood, fitted: bool):
+def test_D2D_Grad(space: Space, lik: Likelihood, fitted: bool):
     torch.manual_seed(0)
     flow, samp, samp_class = (trained if fitted else untrained).all
 
@@ -47,15 +47,15 @@ def test_PermuteData_in_space(space: Space, lik: Likelihood, fitted: bool):
     assert (num_corr / samp.shape[0]) > thresh
 
 
-@mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease])
+@mark.parametrize('lik', [Likelihood.Increase, Likelihood.Decrease], ids=['inc', 'dec'])
 @mark.parametrize('fitted', [True, False], ids=['fit', 'not_fit'])
-def test_N2N_Grad(lik: Likelihood, fitted: bool):
+@mark.parametrize('method', ['loc_scale', 'quantiles', 'hybrid'])
+def test_N2N_Grad(lik: Likelihood, fitted: bool, method: Literal['loc_scale', 'quantiles', 'hybrid']):
     torch.manual_seed(0)
     flow, samp, samp_class = (trained if fitted else untrained).all
-
     samp_b = flow.X_to_B(input=samp, classes=samp_class)[0]
 
-    n2ng = Normal2Normal_Grad(flow=flow, method='loc_scale', grad_scaling=GradientScaling.Softmax)
+    n2ng = Normal2Normal_Grad(flow=flow, method=method, grad_scaling=GradientScaling.Softmax)
     perm_b = n2ng.permute(batch=samp_b, classes=samp_class, likelihood=lik)
 
     res = flow.log_rel_lik_B(samp_b, samp_class) < flow.log_rel_lik_B(perm_b, samp_class)
@@ -68,7 +68,7 @@ def test_N2N_Grad(lik: Likelihood, fitted: bool):
 @mark.parametrize('base_grad', [True, False], ids=['bg', 'no_bg'])
 @mark.parametrize('fitted', [True, False], ids=['fit', 'not_fit'])
 @mark.parametrize('method', ['loc_scale', 'quantiles'])
-def test_N2N_no_Grad(lik: Likelihood, base_grad: bool, fitted: bool, method: Literal['loc_scale', 'quantiles']):
+def test_N2N_NoGrad(lik: Likelihood, base_grad: bool, fitted: bool, method: Literal['loc_scale', 'quantiles']):
     torch.manual_seed(0)
     flow, samp, samp_class = (trained if fitted else untrained).all
     samp_b = flow.X_to_B(input=samp, classes=samp_class)[0]
@@ -89,7 +89,7 @@ def test_N2N_no_Grad(lik: Likelihood, base_grad: bool, fitted: bool, method: Lit
 @mark.parametrize('use_grad_dir', [True, False], ids=['grad', 'no_grad'])
 @mark.parametrize('fitted', [True, False], ids=['fit', 'not_fit'])
 @mark.parametrize('space', [Space.Data, Space.Embedded, Space.Base, Space.Quantiles])
-def test_CurseOfDimDataPermute(use_grad_dir: bool, space: Space, fitted: bool):
+def test_CurseOfDim(use_grad_dir: bool, space: Space, fitted: bool):
     torch.manual_seed(0)
     flow, samp, samp_class = (trained if fitted else untrained).all
 

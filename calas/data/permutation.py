@@ -116,14 +116,12 @@ class Gradient:
         return Gradient(abs=g_abs, sign=g_sign, weight=g_weight, scale=scale, likelihood=likelihood)
 
 
-
 class GradientMixin():
     def __init__(self, scaling: GradientScaling):
         self.grad_scaling = scaling
 
     def prepare_grad(self, grad: Tensor, likelihood: Likelihood) -> Gradient:
         return Gradient.prepare(grad=grad, likelihood=likelihood, scale=self.grad_scaling)
-
 
 
 class Permute(Generic[T], ABC):
@@ -400,11 +398,8 @@ class Normal2Normal_Grad(Dist2Dist[T], GradientMixin):
 
         q = torch.vmap(normal_cdf)(base, use_means, use_stds)
         grad = loss_fn_grad(base if hybrid else q)
-        grad_sign = torch.sign(input=grad)
-        grad = torch.abs(input=grad)
-        grad_weight = grad.reciprocal() / grad.reciprocal().max() if self.scale_grad else 1.
-        if likelihood == Likelihood.Increase:
-            grad_sign *= -1.
+
+        grad_sign, grad_weight = self.prepare_grad(grad=grad, likelihood=likelihood).sign_weight
         
         q_prime = q + grad_sign * grad_weight * u
         b_prime = torch.vmap(normal_ppf_safe)(q_prime, use_means, use_stds)
@@ -688,7 +683,7 @@ class PermuteDims(PermuteData[T]):
     space. It is not possible the indicate a desired likelihood, either.
     """
 
-    def __init__(self, flow: T, space: Space, num_dims: tuple[int, int]=(2,4), change_prob: float=0.1, seed: Optional[int]=0):
+    def __init__(self, flow: T, space: Space, num_dims: tuple[int, int]=(2,4), change_prob: float=0.5, seed: Optional[int]=0):
         super().__init__(flow=flow, seed=seed)
         if space == Space.Embedded or space == Space.Base:
             warn('Permuting dimensions in the Embedding (E) or Base (B) space will not change the likelihood of samples under a normalizing flow!')
