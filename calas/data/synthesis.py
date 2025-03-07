@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from typing import Self
+from typing import Self, Sequence
 from ..data.permutation import Likelihood, Permute, SampleTooSmallException, Space, T
 
 
@@ -14,7 +14,14 @@ class Synthesis:
     
 
     def add_permutation(self, perm: Permute[T]) -> Self:
+        assert isinstance(perm, Permute)
         self.perms.append(perm)
+        return self
+    
+
+    def add_permutations(self, *perms: Sequence[Permute[T]]) -> Self:
+        for perm in perms:
+            self.add_permutation(perm=perm)
         return self
     
 
