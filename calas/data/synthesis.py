@@ -1,12 +1,14 @@
 import torch
 from torch import Tensor
-from typing import Self, Sequence
+from typing import Self, Sequence, Optional
 from ..data.permutation import Likelihood, Permute, SampleTooSmallException, Space, T
+from ..tools.mixin import NoGradNoTrainMixin
 
 
 
-class Synthesis:
+class Synthesis(NoGradNoTrainMixin[T]):
     def __init__(self, flow: T, space_in: Space, space_out: Space):
+        NoGradNoTrainMixin.__init__(self=self, module=flow)
         self.perms: list[Permute[T]] = []
         self.flow = flow
         self.space_in = space_in
