@@ -106,3 +106,27 @@ def test_Synthesis_e2e(lik: Likelihood, fitted: bool, space: Space=Space.Embedde
     else:
         assert torch.all(liks_after >= target_lik)
         assert torch.all(liks_after <= target_lik_crit)
+
+
+
+def test_rsynthesis(space: Space=Space.Embedded):
+    torch.manual_seed(0)
+    flow, holdout, samp_clz = trained.all
+    flow.eval()
+    samp, samp_clz = flow.X_to_E(input=holdout[0:10]).detach(), samp_clz[0:10].detach()
+    synth = Synthesis(flow=flow, space_in=space, space_out=space)
+
+    synth.add_permutation(Data2Data_Grad(flow=flow, space=space, u_min=0.1, u_max=0.15))
+    synth.add_permutation(CurseOfDimDataPermute(flow=flow, space=space, num_dims=(5,15), use_grad_dir=False))
+
+    liks_before = synth.log_rel_lik(sample=samp, classes=samp_clz, space=space)
+
+    rsamp_prime, rsamp_idx_mask = synth.rsynthesize(sample=samp, classes=samp_clz, likelihood=Likelihood.Decrease, target_lik=liks_before.min() - 1.1 * liks_before.std())
+    # liks_after = synth.log_rel_lik(sample=samp[rsamp_idx_mask] + rsamp_prime[rsamp_idx_mask], classes=samp_clz[rsamp_idx_mask], space=synth.space_out)
+    liks_after = synth.log_rel_lik(sample=rsamp_prime[rsamp_idx_mask], classes=samp_clz[rsamp_idx_mask], space=space)
+
+    assert torch.all(liks_after < liks_before[rsamp_idx_mask])
+    # assert torch.all(liks_after[rsamp_idx_mask] < liks_before[rsamp_idx_mask])
+    # assert torch.allclose(liks_after[~rsamp_idx_mask], liks_before[~rsamp_idx_mask])
+
+    print(5)
