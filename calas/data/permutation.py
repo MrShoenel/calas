@@ -5,10 +5,10 @@ from torch import Tensor
 from torch.func import jacrev
 from ..models.flow import CalasFlow
 from ..tools.func import normal_cdf, normal_ppf_safe, normal_log_pdf
+from ..tools.mixin import NoGradNoTrainMixin
 from torch.distributions.normal import Normal
 from torch.distributions.uniform import Uniform
-from types import TracebackType
-from typing import Generic, TypeVar, Self, Optional, Literal, override, final, Callable, Union
+from typing import Generic, TypeVar, Optional, Literal, override, final, Callable, Union
 from abc import ABC, abstractmethod
 from enum import Enum, StrEnum
 from warnings import warn
@@ -124,31 +124,19 @@ class GradientMixin():
         return Gradient.prepare(grad=grad, likelihood=likelihood, scale=self.grad_scaling)
 
 
-class Permute(Generic[T], ABC):
+class Permute(NoGradNoTrainMixin[T], Generic[T], ABC):
     """
     This is the base class for all permutations that can be applied to a sample
     in order to change it, such that it incurs a lower or higher loss.
     """
-    
+
     def __init__(self, flow: T, u_min: float=0.01, u_max: float=0.01, u_frac_negative: float=0.0, seed: Optional[int]=0):
+        NoGradNoTrainMixin.__init__(self=self, module=flow)
         self.flow = flow
         self.u_min = u_min
         self.u_max = u_max
         self.u_frac_negative = u_frac_negative
         self.gen = np.random.default_rng(seed=seed)
-    
-
-    def __enter__(self) -> Self:
-        self.was_training = self.flow.training
-        self.flow.eval()
-        self.ng = torch.no_grad()
-        self.ng.__enter__()
-        return self
-    
-    def __exit__(self, exc_type: Optional[type[BaseException]]=None, exc_value: Optional[BaseException]=None, traceback: Optional[TracebackType]=None) -> None:
-        self.ng.__exit__(exc_type=exc_type, exc_value=exc_value, traceback=traceback)
-        if self.was_training:
-            self.flow.train()
     
 
     @property
