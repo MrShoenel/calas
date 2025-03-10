@@ -72,22 +72,28 @@ class Synthesis(NoGradNoTrainMixin[T]):
 
             for perm in self.perms:
                 sample_prime: Tensor = None
-                # First make sure the to-permute sample is in the correct space!
-                sample_prime = self.space_2_space(sample=sample, classes=clz_int, old=old_space, new=perm.space_in)
+                with torch.no_grad(): # TODO: THIS SHOULD BE OPTIONAL!
+                    # First make sure the to-permute sample is in the correct space!
+                    sample_prime = self.space_2_space(sample=sample, classes=clz_int, old=old_space, new=perm.space_in)
+                
                 old_space = perm.space_out
                 with perm:
                     try:
-                        sample_prime = perm.permute(batch=sample_prime, classes=clz_int, likelihood=likelihood)
+                        sample_prime = perm.permute(batch=sample_prime, classes=clz_int, likelihood=likelihood) # TODO: Check if this is what we want in case we want to differentiate through this!
                     except SampleTooSmallException:
                         continue
-                sample_prime_liks = self.log_rel_lik(sample=sample_prime, classes=clz_int, space=perm.space_out)
+                
+                sample_prime_liks: Tensor = None
+                with torch.no_grad():
+                    sample_prime_liks = self.log_rel_lik(sample=sample_prime, classes=clz_int, space=perm.space_out)
 
-                # Let's look at samples that went too far first and reset them.
-                mask_critical = torch.where(sample_prime_liks < target_lik_crit, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > target_lik_crit, True, False)
+                if not target_lik_crit is None:
+                    # Let's look at samples that went too far first and reset them.
+                    mask_critical = torch.where(sample_prime_liks < target_lik_crit, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > target_lik_crit, True, False)
 
-                if torch.any(mask_critical).item():
-                    sample_prime[mask_critical] = sample[mask_critical]
-                    sample_prime_liks[mask_critical] = liks[mask_critical]
+                    if torch.any(mask_critical).item():
+                        sample_prime[mask_critical] = sample[mask_critical]
+                        sample_prime_liks[mask_critical] = liks[mask_critical]
 
 
                 mask_replace = torch.where(sample_prime_liks < liks, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > liks, True, False)
