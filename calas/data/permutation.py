@@ -604,7 +604,7 @@ class CurseOfDimDataPermute(PermuteData[T], GradientMixin):
     def space_out(self) -> Space:
         return self.space
     
-    def permute(self, batch: Tensor, classes: Tensor, likelihood: Optional[Likelihood]=None) -> Tensor:
+    def permute(self, batch: Tensor, classes: Optional[Tensor]=None, likelihood: Optional[Likelihood]=None) -> Tensor:
         """
         NOTE: The argument `likelihood` is not supported here and ignored.
         """
@@ -626,6 +626,7 @@ class CurseOfDimDataPermute(PermuteData[T], GradientMixin):
         if use_grad_dir is None:
             use_grad_dir = [True, False][self.gen.integers(low=0, high=2, size=(1,)).item()]
         if use_grad_dir:
+            assert isinstance(classes, Tensor)
             grad_fn = self.flow.loss_wrt_X_grad if self.space == Space.Data else (self.flow.loss_wrt_E_grad if self.space == Space.Embedded else self.flow.loss_wrt_B_grad)
             
             grad = grad_fn(batch, classes)
@@ -720,3 +721,9 @@ class PermuteDims(PermuteData[T]):
             new_idx[p2] = t
         
         return batch[:, new_idx]
+
+
+
+class GLASS(PermuteData[T]):
+    def __init__(self, flow: T, u_min: float=0.01, u_max: float=0.01, u_frac_negative: float=0, seed: Optional[int]=0):
+        super().__init__(flow=flow, u_min=u_min, u_max=u_max, u_frac_negative=u_frac_negative, seed=seed)
