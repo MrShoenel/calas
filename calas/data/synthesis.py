@@ -58,7 +58,91 @@ class Synthesis(NoGradNoTrainMixin[T]):
         raise Exception(f'Going from Space {old} to Space {new} is not supported!')
     
 
-    def synthesize(self, sample: Tensor, classes: Tensor, target_lik: float, target_lik_crit: float, likelihood: Likelihood, max_steps: int=20):
+    def rsynthesize(self, sample: Tensor, classes: Tensor, likelihood: Likelihood, target_lik: float, target_lik_crit: Optional[float]=None, max_steps: int=20, accept_all: bool=False) -> tuple[Tensor, Tensor]:
+        """
+        Bla.
+        """
+
+        assert len(self.perms) > 0, 'No permutations have been configured.'
+        assert not sample.requires_grad and not classes.requires_grad, 'The variant here uses the reparameterization trick and returns a tensor that can be added to the original sample.'
+
+        with self:
+            clz_int = classes.squeeze().to(dtype=torch.int64)
+            # Transfer the sample already into the space of the first permutation.
+            liks = self.log_rel_lik(sample=sample, classes=clz_int, space=self.perms[0].space_in)
+            num_obs = sample.shape[0]
+            
+            # Let's reserve a tensor for the reparameterization trick in the *output*-space:
+            sample_prime_idx = torch.tensor(list(range(num_obs)), device=sample.device)
+
+            result_list: list[Tensor] = []
+            result_list_idx: list[Tensor] = []
+
+            steps = 0
+            old_space = self.space_in
+            while steps < max_steps and sample.shape[0] > 0:
+                steps += 1
+
+                for perm in self.perms:
+                    with perm:
+                        sample_prime = self.space_2_space(sample=sample, classes=clz_int, old=old_space, new=perm.space_in)
+                        try:
+                            sample_prime = perm.permute(batch=sample_prime, classes=clz_int, likelihood=likelihood)
+                        except SampleTooSmallException:
+                            continue
+
+                        sample_prime_liks = self.log_rel_lik(sample=sample_prime, classes=clz_int, space=perm.space_out)
+                        if not target_lik_crit is None:
+                            # Let's look at samples that went too far first and reset them.
+                            mask_critical = torch.where(sample_prime_liks < target_lik_crit, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > target_lik_crit, True, False)
+
+                            if torch.any(mask_critical).item():
+                                # Reset those samples to what they were before.
+                                sample_prime[mask_critical] = sample[mask_critical]
+                                sample_prime_liks[mask_critical] = liks[mask_critical]
+                        
+
+                        mask_replace = torch.where(sample_prime_liks < liks, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > liks, True, False)
+                        if torch.any(mask_replace).item():
+                            # Already replace samples that went into the right direction.
+                            liks[mask_replace] = sample_prime_liks[mask_replace]
+                            sample[mask_replace] = sample_prime[mask_replace]
+                        
+
+                        mask_accept = torch.where(sample_prime_liks < target_lik, True, False) if likelihood == Likelihood.Decrease else torch.where(sample_prime_liks > target_lik, True, False)
+                        if torch.any(mask_accept).item():
+                            result_list.append(self.space_2_space(sample=sample_prime[mask_accept], classes=clz_int[mask_accept], old=perm.space_out, new=self.space_out))
+                            result_list_idx.append(sample_prime_idx[mask_accept])
+
+                            # Now remove these samples from the to-do list!
+                            clz_int = clz_int[~mask_accept]
+                            sample_prime_idx = sample_prime_idx[~mask_accept]
+                            sample = sample[~mask_accept]
+                            liks = liks[~mask_accept]
+
+                        if sample.shape[0] == 0:
+                            break
+            
+
+            output_dims = self.flow.num_dims_X if self.space_out == Space.Data else self.flow.num_dims_E # Note E==B, so no more ifs required.
+            result = torch.zeros(size=(num_obs, output_dims), device=sample.device, dtype=sample.dtype)
+            result_idx_mask = torch.full(size=(num_obs,), fill_value=False)
+
+
+            if len(result_list_idx) > 0:
+                result_idx = torch.cat(tensors=result_list_idx)
+                result[result_idx] = torch.vstack(tensors=result_list)
+                result_idx_mask[result_idx] = True
+            
+            if accept_all and sample.shape[0] > 0:
+                result[sample_prime_idx] = sample
+                
+
+            return result, result_idx_mask
+
+
+
+    def synthesize(self, sample: Tensor, classes: Tensor, likelihood: Likelihood, target_lik: float, target_lik_crit: Optional[float]=None, max_steps: int=20):
         assert len(self.perms) > 0
         clz_int = classes.squeeze().to(dtype=torch.int64)
         liks = self.log_rel_lik(sample=sample, classes=clz_int, space=self.space_in)
