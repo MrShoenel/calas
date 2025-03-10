@@ -36,7 +36,20 @@ class CalasFlow(nn.Module):
         self._loss_grad_wrt_E = jacrev(func=self.loss_wrt_E)
         self._loss_wrt_B_grad = jacrev(func=self.loss_wrt_B)
 
-        # TODO: Perhaps implement static translation according to conditional means
+        # TODO: Implement static translation according to conditional means
+    
+
+    @property
+    def num_dims_X(self) -> int:
+        return self.num_dims
+    
+    @property
+    def num_dims_E(self) -> int:
+        return self.num_dims
+    
+    @property
+    def num_dims_B(self) -> int:
+        return self.num_dims
     
 
     @override
@@ -285,6 +298,12 @@ class CalasFlowWithRepr(CalasFlow):
     def __init__(self, num_classes: int, flows: list[Flow], repr: Union[Representation, ReconstructableRepresentation], *args, **kwargs):
         super().__init__(num_dims=repr.embed_dim, num_classes=num_classes, flows=flows, *args, **kwargs)
         self.repr = repr
+    
+
+    @property
+    @override
+    def num_dims_X(self) -> int:
+        return self.repr.input_dim
     
 
     @override
